@@ -1,0 +1,1052 @@
+import os
+import re
+import json
+import uuid
+import subprocess
+from typing import Dict, List, Tuple, Optional, Any
+from app.core.config import get_ffmpeg_binary, get_ffprobe_binary, TEMP_DIR, UPLOADS_DIR, OUTPUTS_DIR, FONTS_DIR
+
+from urllib.parse import urlparse
+
+class VideoEngine:
+    """
+    Core Video Ingestion, Timeline Milestone Slicing & FFmpeg Assembly Engine.
+    Handles anti-copyright protection, blurred backdrops, typography, and multi-part series.
+    """
+
+    @staticmethod
+    def is_valid_youtube_url(url: str) -> bool:
+        """Validates that a URL is a legitimate YouTube video URL (prevents SSRF and flag injection)."""
+        if not url or not isinstance(url, str):
+            return False
+        url = url.strip()
+        if url.startswith("-"):
+            return False
+        try:
+            parsed = urlparse(url)
+            if parsed.scheme not in ("http", "https"):
+                return False
+            hostname = (parsed.hostname or "").lower()
+            if hostname in ("youtube.com", "www.youtube.com", "m.youtube.com"):
+                return parsed.path in ("/watch", "/watch_popup") or parsed.path.startswith(("/shorts/", "/embed/"))
+            elif hostname in ("youtu.be", "www.youtu.be"):
+                return len(parsed.path.strip("/")) > 0
+            return False
+        except Exception:
+            return False
+
+    @staticmethod
+    def escape_ffmpeg_drawtext(text: str) -> str:
+        """
+        Escapes special characters for FFmpeg drawtext filter:
+        %, comma, colons, single/double quotes, and backslashes.
+        """
+        if not text:
+            return ""
+        s = text.replace("\r", " ").replace("\n", " ")
+        s = s.replace("\\", "\\\\")
+        s = s.replace("'", "\\'")
+        s = s.replace("%", "\\%")
+        s = s.replace(":", "\\:")
+        s = s.replace(",", "\\,")
+        return s
+
+    @staticmethod
+    def get_font_for_lang(lang: str = "en") -> str:
+        """Returns safe, escaped FFmpeg fontfile path matching the language."""
+        cand = None
+        if lang in ["ur", "ar"]:
+            cand = FONTS_DIR / "NotoNastaliqUrdu.ttf"
+            if not cand.exists():
+                cand = FONTS_DIR / "arabtype.ttf"
+        elif lang == "hi":
+            cand = FONTS_DIR / "NirmalaB.ttf"
+        else:
+            cand = FONTS_DIR / "arialbd.ttf"
+
+        if not cand or not cand.exists():
+            cand = FONTS_DIR / "arialbd.ttf"
+
+        if cand.exists():
+            p = str(cand.resolve()).replace("\\", "/")
+            return p.replace(":", "\\:")
+        return ""
+
+    @staticmethod
+    def get_duration(video_path: str) -> float:
+        """Returns total duration of media file in seconds."""
+        ffprobe = get_ffprobe_binary()
+        try:
+            cmd = [ffprobe, "-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", video_path]
+            res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            if res.returncode == 0:
+                return float(res.stdout.strip())
+        except Exception:
+            pass
+        return 60.0
+
+    @staticmethod
+    def _timestamp_to_seconds(t_str: str) -> float:
+        """Converts MM:SS.mmm or HH:MM:SS.mmm string to seconds."""
+        t_str = t_str.strip().replace(",", ".")
+        parts = t_str.split(":")
+        try:
+            if len(parts) == 3:
+                return int(parts[0]) * 3600 + int(parts[1]) * 60 + float(parts[2])
+            elif len(parts) == 2:
+                return int(parts[0]) * 60 + float(parts[1])
+        except Exception:
+            pass
+        return 0.0
+
+    @staticmethod
+    def parse_timed_subtitles(subtitle_content: str) -> List[Dict[str, Any]]:
+        """Parses WebVTT or SRT subtitle content into structured timed cues."""
+        if not subtitle_content:
+            return []
+        cues = []
+        blocks = re.split(r'\n\s*\n', subtitle_content.strip())
+        pattern = re.compile(r'((?:\d{1,2}:)?\d{2}:\d{2}[\.,]\d{3})\s*-->\s*((?:\d{1,2}:)?\d{2}:\d{2}[\.,]\d{3})')
+
+        for block in blocks:
+            lines = [l.strip() for l in block.splitlines() if l.strip()]
+            time_match = None
+            text_lines = []
+            for line in lines:
+                m = pattern.search(line)
+                if m:
+                    time_match = m
+                elif time_match:
+                    clean = re.sub(r'<[^>]+>', '', line).strip()
+                    if clean:
+                        text_lines.append(clean)
+            if time_match and text_lines:
+                start_sec = VideoEngine._timestamp_to_seconds(time_match.group(1))
+                end_sec = VideoEngine._timestamp_to_seconds(time_match.group(2))
+                combined_text = " ".join(text_lines)
+                cues.append({
+                    "start": start_sec,
+                    "end": end_sec,
+                    "text": combined_text
+                })
+        return cues
+
+    @staticmethod
+    def build_timeline_summary(timed_cues: List[Dict[str, Any]], max_events: int = 25) -> str:
+        """Picks spaced milestone dialogue cues across the timeline with timecodes."""
+        if not timed_cues:
+            return ""
+        if len(timed_cues) <= max_events:
+            selected = timed_cues
+        else:
+            step = len(timed_cues) / max_events
+            selected = [timed_cues[int(i * step)] for i in range(max_events)]
+
+        def fmt_time(seconds: float) -> str:
+            m = int(seconds // 60)
+            s = int(seconds % 60)
+            return f"[{m:02d}:{s:02d}]"
+
+        lines = []
+        for cue in selected:
+            t_str = fmt_time(cue["start"])
+            text = cue["text"].replace("\n", " ").strip()
+            lines.append(f"{t_str} {text}")
+        return "\n".join(lines)
+
+    @staticmethod
+    def build_chronological_scene_map(
+        scene_ranges: Optional[List[Tuple[float, float]]] = None,
+        total_movie_dur: float = 3600.0,
+        target_duration: float = 60.0,
+        micro_clip_dur: float = 3.8,
+        scene_blocks: Optional[List[Any]] = None
+    ) -> List[Tuple[float, float]]:
+        """
+        Creates a strictly chronological series of 3-5s micro-clips spanning the entire story.
+        When scene_blocks is provided, clips are allocated proportionally to each block's actual
+        spoken narration duration, locking visuals 100% to narration without drift.
+        """
+        if total_movie_dur <= 0:
+            total_movie_dur = 3600.0
+
+        if scene_blocks and len(scene_blocks) > 0:
+            # Proportional Time-Locked Slicing:
+            # Each block's micro-clips are sized strictly by that scene's spoken duration.
+            # Zero drift: When narration finishes Scene X, visuals immediately cut to Scene X+1.
+            cuts: List[Tuple[float, float]] = []
+
+            for b in scene_blocks:
+                b_dur = getattr(b, "speech_dur", 0.0)
+                if b_dur <= 0.0:
+                    b_dur = max(2.5, target_duration / len(scene_blocks))
+
+                # Micro-clip count for this scene block
+                n_clips = max(1, int(round(b_dur / micro_clip_dur)))
+                base_c_dur = b_dur / n_clips
+
+                m_start = max(0.0, min(total_movie_dur - 1.5, getattr(b, "movie_start", 0.0)))
+                m_end = max(m_start + 1.5, min(total_movie_dur, getattr(b, "movie_end", m_start + 5.0)))
+                span = max(1.0, m_end - m_start)
+
+                if span <= base_c_dur:
+                    # Narrow window: clamp clips strictly inside [m_start, m_end]
+                    for j in range(n_clips):
+                        sub_dur = min(span, base_c_dur)
+                        max_s = max(m_start, m_end - sub_dur)
+                        s = m_start + ((j % 3) * 0.5 * (max_s - m_start)) if max_s > m_start else m_start
+                        e = min(m_end, s + sub_dur)
+                        if e <= s:
+                            e = min(m_end, s + 1.0)
+                        cuts.append((round(s, 2), round(e, 2)))
+                else:
+                    max_start = max(m_start, m_end - base_c_dur)
+                    step = (max_start - m_start) / max(1, n_clips - 1) if n_clips > 1 else 0.0
+                    for j in range(n_clips):
+                        c_dur = round(base_c_dur, 2)
+                        s = m_start + j * step
+                        s = max(m_start, min(max_start, s))
+                        e = min(m_end, s + c_dur)
+                        if e <= s:
+                            e = min(m_end, s + 1.5)
+                        cuts.append((round(s, 2), round(e, 2)))
+
+            return cuts
+
+        # Fallback to scene_ranges when scene_blocks not provided
+        scene_ranges = scene_ranges or []
+
+        # Rhythmic clip duration pattern (varying between 3.0s and 4.6s for dynamic cinematic editing)
+        rhythm_durations = [3.4, 4.2, 3.2, 4.6, 3.8, 4.0, 3.6, 4.4]
+
+        # Calculate clips to fill target_duration
+        clip_lengths: List[float] = []
+        accum = 0.0
+        r_idx = 0
+        while accum < target_duration:
+            dur_cand = rhythm_durations[r_idx % len(rhythm_durations)]
+            r_idx += 1
+            if accum + dur_cand > target_duration:
+                rem = target_duration - accum
+                if rem >= 2.0:
+                    clip_lengths.append(round(rem, 2))
+                elif clip_lengths:
+                    clip_lengths[-1] = round(clip_lengths[-1] + rem, 2)
+                accum = target_duration
+                break
+            clip_lengths.append(dur_cand)
+            accum += dur_cand
+
+        num_clips = max(8, len(clip_lengths))
+
+        # Check if scene_ranges are valid or clustered in opening 2 minutes or shorter than 70% of target
+        clean_ranges = [(s, e) for s, e in scene_ranges if e > s]
+        covered_span = sum(e - s for s, e in clean_ranges)
+        max_ts = max([e for _, e in clean_ranges], default=0.0)
+        is_clustered = (
+            len(clean_ranges) < 4
+            or covered_span < (target_duration * 0.70)
+            or max_ts <= 120.0
+            or (total_movie_dur > 600 and max_ts < 0.20 * total_movie_dur)
+        )
+
+        cuts = []
+        if is_clustered:
+            # Proportional 3-Act Chronological Slicing across the entire film:
+            # Act 1 (Hook & Setup): 20% clips from 2% to 25% of movie
+            # Act 2 (Investigation & Confrontations): 60% clips from 25% to 75% of movie
+            # Act 3 (Climax & Resolution): 20% clips from 75% to 92% of movie (before end credits)
+            n1 = max(2, int(round(num_clips * 0.20)))
+            n2 = max(4, int(round(num_clips * 0.60)))
+            n3 = max(2, num_clips - n1 - n2)
+
+            act_configs = [
+                (n1, 0.02 * total_movie_dur, 0.25 * total_movie_dur),
+                (n2, 0.25 * total_movie_dur, 0.75 * total_movie_dur),
+                (n3, 0.75 * total_movie_dur, 0.92 * total_movie_dur)
+            ]
+
+            clip_idx = 0
+            for count, start_bound, end_bound in act_configs:
+                span = max(1.0, end_bound - start_bound)
+                step = span / max(1, count)
+                for i in range(count):
+                    c_dur = clip_lengths[clip_idx] if clip_idx < len(clip_lengths) else 3.6
+                    clip_idx += 1
+                    s = start_bound + i * step
+                    s = max(0.0, min(total_movie_dur - c_dur, s))
+                    e = s + c_dur
+                    cuts.append((round(s, 2), round(e, 2)))
+        else:
+            # Valid storyboard timestamp ranges across the movie: distribute micro-clips chronologically
+            clean_ranges.sort(key=lambda x: x[0])
+            clips_per_range = max(1, num_clips // len(clean_ranges))
+            remaining = num_clips
+            clip_idx = 0
+
+            for r_idx, (s_sec, e_sec) in enumerate(clean_ranges):
+                k = clips_per_range if r_idx < len(clean_ranges) - 1 else remaining
+                k = max(1, k)
+                remaining -= k
+
+                s_sec = max(0.0, min(total_movie_dur - 3.5, s_sec))
+                e_sec = max(s_sec + 3.5, min(total_movie_dur, e_sec))
+                span = max(1.0, e_sec - s_sec)
+                step = span / max(1, k)
+
+                for j in range(k):
+                    c_dur = clip_lengths[clip_idx] if clip_idx < len(clip_lengths) else 3.6
+                    clip_idx += 1
+                    ideal_s = s_sec + j * step
+                    c_s = max(s_sec, min(max(s_sec, e_sec - c_dur), ideal_s))
+                    c_e = min(e_sec, c_s + c_dur)
+                    if c_e <= c_s:
+                        c_e = min(total_movie_dur, c_s + c_dur)
+                    cuts.append((round(c_s, 2), round(c_e, 2)))
+
+        cuts.sort(key=lambda x: x[0])
+        return cuts
+
+    @staticmethod
+    def extract_youtube_info(url: str, output_dir: str, job_id: str) -> Dict[str, Any]:
+        """
+        Fast metadata and multi-language subtitle extraction via yt-dlp without downloading full video.
+        """
+        if not VideoEngine.is_valid_youtube_url(url):
+            return {"title": "Movie Story Explanation", "duration": 60.0, "subtitles_text": "", "timeline_summary": ""}
+
+        meta_prefix = os.path.join(output_dir, f"{job_id}_info")
+        cmd = [
+            "yt-dlp",
+            "--skip-download",
+            "-i",
+            "--write-subs",
+            "--write-auto-subs",
+            "--sub-lang", "en,es,id,ur,hi,ar,fr,de,pt,ru,vi,th,ja,ko",
+            "--sub-format", "vtt/srt/best",
+            "--write-info-json",
+            "--no-check-certificates",
+            "-o", meta_prefix,
+            "--",
+            url
+        ]
+
+        try:
+            subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=60)
+        except Exception:
+            pass
+
+        meta = {
+            "title": "Movie Story Explanation",
+            "description": "",
+            "duration": 0,
+            "subtitles_text": "",
+            "timeline_summary": ""
+        }
+
+        # Parse info.json
+        for f in os.listdir(output_dir):
+            if f.startswith(f"{job_id}_info") and f.endswith(".info.json"):
+                fp = os.path.join(output_dir, f)
+                try:
+                    with open(fp, "r", encoding="utf-8") as jf:
+                        d = json.load(jf)
+                        meta["title"] = d.get("title", meta["title"])
+                        meta["description"] = d.get("description", "")
+                        meta["duration"] = d.get("duration", 0)
+                    os.remove(fp)
+                except Exception:
+                    pass
+                break
+
+        # Parse subtitle transcripts (.vtt / .srt) with timestamps
+        timed_cues = []
+        for f in os.listdir(output_dir):
+            if f.startswith(f"{job_id}_info") and (f.endswith(".vtt") or f.endswith(".srt")):
+                fp = os.path.join(output_dir, f)
+                try:
+                    with open(fp, "r", encoding="utf-8", errors="ignore") as sf:
+                        content = sf.read()
+                        cues = VideoEngine.parse_timed_subtitles(content)
+                        if cues:
+                            timed_cues.extend(cues)
+                    os.remove(fp)
+                except Exception:
+                    pass
+
+        if timed_cues:
+            timed_cues.sort(key=lambda x: x["start"])
+            meta["timeline_summary"] = VideoEngine.build_timeline_summary(timed_cues, max_events=30)
+            dialogue_texts = [f"[{int(c['start']//60):02d}:{int(c['start']%60):02d}] {c['text']}" for c in timed_cues[:400]]
+            meta["subtitles_text"] = f"Key Timeline Milestones:\n{meta['timeline_summary']}\n\nDialogue Excerpts:\n" + "\n".join(dialogue_texts)
+            meta["dialogue_timeline"] = timed_cues
+
+        return meta
+
+    @staticmethod
+    def parse_raw_transcript_text(raw_text: str) -> Dict[str, Any]:
+        """
+        Parses raw transcript text from various formats:
+        1. YouTube Web UI copy-paste (timestamp on separate line, text on next line)
+        2. Same-line timestamp: '00:15 text' or '[00:15] text'
+        3. Standard WebVTT / SRT subtitle text
+        Returns structured dict with dialogue_timeline, timeline_summary, subtitles_text, total_duration.
+        """
+        empty_res = {
+            "dialogue_timeline": [],
+            "subtitles_text": "",
+            "timeline_summary": "",
+            "total_duration": 0.0
+        }
+        if not raw_text or not raw_text.strip():
+            return empty_res
+
+        timed_cues: List[Dict[str, Any]] = []
+
+        # Check if it's WebVTT or SRT with -->
+        is_vtt_or_srt = "-->" in raw_text or raw_text.strip().startswith("WEBVTT")
+        if is_vtt_or_srt:
+            timed_cues = VideoEngine.parse_timed_subtitles(raw_text)
+        else:
+            def clean_yt_snippet(t_raw: str) -> str:
+                # Remove accessibility aria strings like '1 hour, 20 minutes, 45 seconds'
+                t_clean = re.sub(r'^\d+\s*hours?,\s*\d+\s*minutes?,\s*\d+\s*seconds?', '', t_raw, flags=re.IGNORECASE)
+                t_clean = re.sub(r'^\d+\s*minutes?,\s*\d+\s*seconds?', '', t_clean, flags=re.IGNORECASE)
+                t_clean = re.sub(r'^\d+\s*seconds?', '', t_clean, flags=re.IGNORECASE)
+                # Remove sound annotations like [Music] or [Applause]
+                t_clean = re.sub(r'\[(?:Music|Applause|Sound|Laughter|Silence|Cheering)\]', '', t_clean, flags=re.IGNORECASE)
+                t_clean = re.sub(r'\s+', ' ', t_clean).strip()
+                return t_clean
+
+            lines = [l.strip() for l in raw_text.splitlines() if l.strip()]
+            ts_pattern = re.compile(r'^\[?(\d{1,2}:\d{2}(?::\d{2})?(?:[\.,]\d{1,3})?)\]?\s*(.*)$')
+            i = 0
+            while i < len(lines):
+                line = lines[i]
+                m = ts_pattern.match(line)
+                if m:
+                    ts_str = m.group(1)
+                    raw_rest = m.group(2).strip()
+                    clean_rest = clean_yt_snippet(raw_rest)
+                    start_sec = VideoEngine._timestamp_to_seconds(ts_str)
+                    if clean_rest:
+                        timed_cues.append({
+                            "start": start_sec,
+                            "end": start_sec + 5.0,
+                            "text": clean_rest
+                        })
+                        i += 1
+                    else:
+                        i += 1
+                        text_accum = []
+                        while i < len(lines):
+                            next_line = lines[i]
+                            if ts_pattern.match(next_line):
+                                break
+                            clean_nl = clean_yt_snippet(next_line)
+                            if clean_nl:
+                                text_accum.append(clean_nl)
+                            i += 1
+                        if text_accum:
+                            timed_cues.append({
+                                "start": start_sec,
+                                "end": start_sec + 5.0,
+                                "text": " ".join(text_accum)
+                            })
+                else:
+                    i += 1
+
+        if not timed_cues:
+            return empty_res
+
+        timed_cues.sort(key=lambda x: x["start"])
+        if not is_vtt_or_srt:
+            for j in range(len(timed_cues)):
+                if j + 1 < len(timed_cues):
+                    next_start = timed_cues[j + 1]["start"]
+                    if next_start > timed_cues[j]["start"]:
+                        timed_cues[j]["end"] = min(timed_cues[j]["start"] + 15.0, next_start)
+                    else:
+                        timed_cues[j]["end"] = timed_cues[j]["start"] + 5.0
+                else:
+                    timed_cues[j]["end"] = timed_cues[j]["start"] + 5.0
+
+        max_end = max([c["end"] for c in timed_cues], default=0.0)
+        timeline_summary = VideoEngine.build_timeline_summary(timed_cues, max_events=30)
+        dialogue_texts = [f"[{int(c['start']//60):02d}:{int(c['start']%60):02d}] {c['text']}" for c in timed_cues[:400]]
+        subtitles_text = f"Key Timeline Milestones:\n{timeline_summary}\n\nDialogue Excerpts:\n" + "\n".join(dialogue_texts)
+
+        return {
+            "dialogue_timeline": timed_cues,
+            "subtitles_text": subtitles_text,
+            "timeline_summary": timeline_summary,
+            "total_duration": max_end
+        }
+
+    @staticmethod
+    def build_yt_dlp_section_args(scene_ranges: List[Tuple[float, float]]) -> List[str]:
+        """
+        Converts scene time ranges [(start_sec, end_sec)] into yt-dlp --download-sections arguments.
+        Example: [(18.0, 53.0)] -> ["--download-sections", "*00:18-00:53"]
+        """
+        if not scene_ranges:
+            return []
+
+        def sec_to_time(s: float) -> str:
+            m = int(s // 60)
+            sec = int(s % 60)
+            return f"{m:02d}:{sec:02d}"
+
+        args = []
+        for start, end in scene_ranges:
+            if end > start:
+                args.extend(["--download-sections", f"*{sec_to_time(start)}-{sec_to_time(end)}"])
+        return args
+
+    @staticmethod
+    def get_yt_dlp_download_cmd(url: str, output_path: str, resolution: str = "720p") -> List[str]:
+        """
+        Builds optimized yt-dlp download command with -N 5 multi-threading,
+        forced overwrites, and 720p preference to prevent YouTube bandwidth throttling.
+        """
+        res_filter = "height<=720" if resolution == "720p" else "height<=1080"
+        format_spec = f"bestvideo[{res_filter}][ext=mp4]+bestaudio[ext=m4a]/best[{res_filter}][ext=mp4]/best"
+        return [
+            "yt-dlp",
+            "--force-overwrites",
+            "--no-continue",
+            "--no-playlist",
+            "-N", "5",
+            "-f", format_spec,
+            "--no-check-certificates",
+            "-o", output_path,
+            "--",
+            url
+        ]
+
+    @staticmethod
+    def download_youtube_video(url: str, output_path: str, resolution: str = "720p", force: bool = False) -> bool:
+        """Downloads 720p/1080p source video cleanly and fast via multi-threaded yt-dlp."""
+        if not VideoEngine.is_valid_youtube_url(url):
+            return False
+        if force and os.path.exists(output_path):
+            try:
+                os.remove(output_path)
+            except Exception:
+                pass
+        cmd = VideoEngine.get_yt_dlp_download_cmd(url, output_path, resolution=resolution)
+        res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        return res.returncode == 0 and os.path.exists(output_path) and os.path.getsize(output_path) > 1000
+
+    @staticmethod
+    def download_youtube_sections(
+        url: str,
+        scene_ranges: List[Tuple[float, float]],
+        output_video: str,
+        temp_dir: str,
+        job_id: str
+    ) -> bool:
+        """
+        Selectively downloads ONLY the required timestamp sections from YouTube
+        using yt-dlp --download-sections, saving 95%+ download time and bandwidth.
+        """
+        sec_args = VideoEngine.build_yt_dlp_section_args(scene_ranges)
+        if not sec_args or not VideoEngine.is_valid_youtube_url(url):
+            return False
+
+        sec_out_pattern = os.path.join(temp_dir, f"{job_id}_sec_%(section_number)s.mp4")
+        cmd = [
+            "yt-dlp",
+            "-N", "5",
+            "-f", "bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]/best[height<=720]/best",
+            "--no-check-certificates"
+        ] + sec_args + [
+            "-o", sec_out_pattern,
+            "--",
+            url
+        ]
+
+        res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+
+        sec_files = []
+        try:
+            if os.path.exists(temp_dir):
+                for f in os.listdir(temp_dir):
+                    if f.startswith(f"{job_id}_sec_") and not f.endswith(".part") and not f.endswith(".ytdl"):
+                        fp = os.path.join(temp_dir, f)
+                        try:
+                            if os.path.exists(fp) and os.path.getsize(fp) > 1000:
+                                sec_files.append(fp)
+                        except Exception:
+                            pass
+        except Exception:
+            pass
+
+        if not sec_files:
+            return False
+
+        sec_files.sort()
+
+        if len(sec_files) == 1:
+            try:
+                shutil.copyfile(sec_files[0], output_video)
+                return os.path.exists(output_video) and os.path.getsize(output_video) > 1000
+            except Exception:
+                pass
+
+        ffmpeg_bin = get_ffmpeg_binary()
+        concat_list = os.path.join(temp_dir, f"{job_id}_concat_secs.txt")
+        try:
+            with open(concat_list, "w", encoding="utf-8") as f:
+                for sf in sec_files:
+                    clean_p = sf.replace("\\", "/")
+                    f.write(f"file '{clean_p}'\n")
+
+            c_cmd = [
+                ffmpeg_bin, "-y", "-f", "concat", "-safe", "0",
+                "-i", concat_list,
+                "-c", "copy",
+                output_video
+            ]
+            c_res = subprocess.run(c_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            if c_res.returncode == 0 and os.path.exists(output_video) and os.path.getsize(output_video) > 1000:
+                return True
+        except Exception:
+            pass
+
+        return os.path.exists(output_video) and os.path.getsize(output_video) > 1000
+
+    @staticmethod
+    def ensure_footage_integrity(
+        url: str,
+        job_id: str,
+        speech_dur: float,
+        temp_dir: str,
+        resolution: str = "720p",
+        scene_ranges: Optional[List[Tuple[float, float]]] = None
+    ) -> str:
+        """
+        Bulletproof source ingestion system:
+        1. Keeps sections and full video in strictly isolated filenames.
+        2. Validates duration against required voiceover duration.
+        3. Fails loudly with RuntimeError if downloaded footage is insufficient,
+           preventing silent loop repetition in FFmpeg.
+        """
+        sections_path = os.path.join(temp_dir, f"{job_id}_sections_raw.mp4")
+        full_path = os.path.join(temp_dir, f"{job_id}_full_raw.mp4")
+
+        # Try selective sections first IF ranges have sufficient coverage
+        ranges_span = sum(max(0.0, e - s) for s, e in scene_ranges) if scene_ranges else 0.0
+        if scene_ranges and len(scene_ranges) >= 6 and ranges_span >= max(180.0, speech_dur * 0.85):
+            selective_ok = VideoEngine.download_youtube_sections(url, scene_ranges, sections_path, temp_dir, job_id)
+            if selective_ok and os.path.exists(sections_path):
+                sec_dur = VideoEngine.get_duration(sections_path)
+                if sec_dur >= speech_dur * 0.85:
+                    return sections_path
+
+        # Fallback to full movie into a DIFFERENT, dedicated path with force=True
+        dl_ok = VideoEngine.download_youtube_video(url, full_path, resolution=resolution, force=True)
+        if not dl_ok or not os.path.exists(full_path):
+            raise RuntimeError(f"SourceIntegrityError: Failed to download source video from YouTube for job '{job_id}'.")
+
+        full_dur = VideoEngine.get_duration(full_path)
+        required_min = speech_dur * 0.85
+        if full_dur < required_min:
+            raise RuntimeError(
+                f"SourceIntegrityError: Downloaded footage duration ({round(full_dur, 1)}s) is significantly shorter than required narration ({round(speech_dur, 1)}s, minimum required: {round(required_min, 1)}s). Refusing to silently loop partial footage."
+            )
+
+        return full_path
+
+    @staticmethod
+    def detect_camera_cuts_in_window(
+        video_path: str,
+        start: float,
+        end: float,
+        threshold: float = 10.0
+    ) -> List[Tuple[float, float]]:
+        """
+        Detects actual visual camera cuts in the video between start and end using FFmpeg's native scdet filter.
+        Returns a list of shot boundaries [(s1, e1), (s2, e2), ...].
+        If no cuts are detected or on error, returns [(start, end)].
+        """
+        dur = end - start
+        if dur <= 4.5 or not os.path.exists(video_path):
+            return [(start, end)]
+
+        ffmpeg_bin = get_ffmpeg_binary()
+        cmd = [
+            ffmpeg_bin, "-y",
+            "-ss", str(round(start, 2)),
+            "-to", str(round(end, 2)),
+            "-i", video_path,
+            "-vf", f"scdet=threshold={threshold}",
+            "-f", "null", "-"
+        ]
+        try:
+            res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=20)
+            cut_times = [float(m) for m in re.findall(r'lavfi\.scd\.time:\s*([\d\.]+)', res.stderr)]
+            abs_cuts = [round(start + ct, 2) for ct in cut_times if 0.8 < ct < (dur - 0.8)]
+            if not abs_cuts:
+                return [(start, end)]
+
+            points = [start] + sorted(list(set(abs_cuts))) + [end]
+            shots = []
+            for i in range(len(points) - 1):
+                p_s, p_e = points[i], points[i+1]
+                if p_e - p_s >= 1.2:
+                    shots.append((p_s, p_e))
+                elif shots:
+                    shots[-1] = (shots[-1][0], p_e)
+            return shots if shots else [(start, end)]
+        except Exception:
+            return [(start, end)]
+
+    @staticmethod
+    def verify_timeline_integrity(cuts: List[Tuple[float, float]], expected_duration: float) -> bool:
+        """
+        Pre-render sanity check ensuring total micro-clip cut duration matches target within tolerance.
+        """
+        if not cuts:
+            return False
+        total_dur = sum(max(0.0, e - s) for s, e in cuts)
+        return abs(total_dur - expected_duration) <= max(3.0, expected_duration * 0.10)
+
+    @staticmethod
+    def slice_and_assemble_scenes(
+        input_video: str,
+        scene_ranges: List[Tuple[float, float]],
+        target_duration: float,
+        output_video: str,
+        temp_dir: str,
+        job_id: str,
+        scene_blocks: Optional[List[Any]] = None
+    ) -> str:
+        """
+        Slices chronological 3-4s micro-clips across the entire movie matching storyboard timestamps,
+        preventing static scene boredom and Content ID match.
+        """
+        ffmpeg_bin = get_ffmpeg_binary()
+        total_movie_dur = VideoEngine.get_duration(input_video)
+
+        # Build strictly chronological micro-scene map
+        cuts = VideoEngine.build_chronological_scene_map(
+            scene_ranges=scene_ranges,
+            total_movie_dur=total_movie_dur,
+            target_duration=target_duration,
+            micro_clip_dur=3.5,
+            scene_blocks=scene_blocks
+        )
+
+        slice_paths = []
+        concat_file = os.path.join(temp_dir, f"{job_id}_concat.txt")
+
+        try:
+            for idx, (s_sec, e_sec) in enumerate(cuts):
+                dur = max(1.5, e_sec - s_sec)
+                slice_p = os.path.join(temp_dir, f"{job_id}_sc_{idx}.mp4")
+                cmd = [
+                    ffmpeg_bin, "-y",
+                    "-ss", str(round(s_sec, 2)),
+                    "-t", str(round(dur, 2)),
+                    "-i", input_video,
+                    "-c:v", "libx264", "-preset", "ultrafast", "-crf", "23",
+                    "-an",
+                    slice_p
+                ]
+                subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                if os.path.exists(slice_p) and os.path.getsize(slice_p) > 0:
+                    slice_paths.append(slice_p)
+
+            if slice_paths:
+                with open(concat_file, "w", encoding="utf-8") as f:
+                    for sp in slice_paths:
+                        safe_p = sp.replace("\\", "/")
+                        f.write(f"file '{safe_p}'\n")
+
+                cmd_concat = [
+                    ffmpeg_bin, "-y",
+                    "-f", "concat", "-safe", "0",
+                    "-i", concat_file,
+                    "-c", "copy",
+                    output_video
+                ]
+                res = subprocess.run(cmd_concat, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                if res.returncode == 0 and os.path.exists(output_video) and os.path.getsize(output_video) > 0:
+                    return output_video
+        except Exception as e:
+            print(f"[Slice & Assemble Notice] {e}")
+        finally:
+            for sp in slice_paths:
+                if os.path.exists(sp):
+                    try: os.remove(sp)
+                    except Exception: pass
+            if os.path.exists(concat_file):
+                try: os.remove(concat_file)
+                except Exception: pass
+
+        return VideoEngine.sample_timeline(input_video, target_duration, total_movie_dur, output_video, temp_dir, job_id)
+
+    @staticmethod
+    def sample_timeline(
+        input_video: str,
+        target_dur: float,
+        movie_dur: float,
+        output_video: str,
+        temp_dir: str,
+        job_id: str
+    ) -> str:
+        """Fallback timeline sampler: extracts 6-10 milestone clips evenly across the entire movie."""
+        ffmpeg_bin = get_ffmpeg_binary()
+        num_scenes = max(8, int(round(target_dur / 3.8)))
+        clip_dur = target_dur / num_scenes
+        interval = max(0.5, (movie_dur - clip_dur) / max(1, num_scenes - 1)) if movie_dur > clip_dur else 1.0
+
+        slice_paths = []
+        concat_file = os.path.join(temp_dir, f"{job_id}_sample_concat.txt")
+
+        try:
+            for i in range(num_scenes):
+                start_t = i * interval
+                slice_p = os.path.join(temp_dir, f"{job_id}_sample_{i}.mp4")
+                cmd = [
+                    ffmpeg_bin, "-y",
+                    "-ss", str(round(start_t, 2)),
+                    "-t", str(round(clip_dur, 2)),
+                    "-i", input_video,
+                    "-c:v", "libx264", "-preset", "ultrafast", "-crf", "23",
+                    "-an",
+                    "-vf", "setpts=PTS-STARTPTS",
+                    slice_p
+                ]
+                subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                if os.path.exists(slice_p) and os.path.getsize(slice_p) > 0:
+                    slice_paths.append(slice_p)
+
+            if len(slice_paths) >= 2:
+                with open(concat_file, "w", encoding="utf-8") as f:
+                    for sp in slice_paths:
+                        safe_p = sp.replace("\\", "/")
+                        f.write(f"file '{safe_p}'\n")
+
+                cmd_concat = [
+                    ffmpeg_bin, "-y",
+                    "-f", "concat", "-safe", "0",
+                    "-i", concat_file,
+                    "-c", "copy",
+                    output_video
+                ]
+                subprocess.run(cmd_concat, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                if os.path.exists(output_video) and os.path.getsize(output_video) > 0:
+                    return output_video
+        finally:
+            for sp in slice_paths:
+                if os.path.exists(sp):
+                    try: os.remove(sp)
+                    except Exception: pass
+            if os.path.exists(concat_file):
+                try: os.remove(concat_file)
+                except Exception: pass
+
+        return input_video
+
+    @staticmethod
+    def generate_ass_subtitle_file(
+        scene_subtitles: List[str],
+        total_duration: float,
+        output_ass_path: str,
+        aspect_ratio: str = "horizontal",
+        lang: str = "en",
+        timed_cues: Optional[List[Dict[str, Any]]] = None,
+        speed_factor: float = 1.02
+    ) -> bool:
+        """
+        Generates an Advanced SubStation Alpha (.ass) file with HarfBuzz/FriBiDi compatible
+        styling, dark pillbox background, and proper margins for YouTube/TikTok safe zones.
+        Uses exact Edge-TTS boundary timestamps (or character-proportional timing) scaled
+        by speed_factor to match synchronized atempo/setpts drift.
+        Eliminates tofu boxes ([][][]) for Urdu, Arabic, and Hindi text.
+        """
+        if (not scene_subtitles and not timed_cues) or total_duration <= 0:
+            return False
+
+        res_x = 1080 if aspect_ratio == "vertical" else (1080 if aspect_ratio == "square" else 1920)
+        res_y = 1920 if aspect_ratio == "vertical" else (1080 if aspect_ratio == "square" else 1080)
+        font_size = 44 if aspect_ratio == "vertical" else 36
+        margin_v = 140 if aspect_ratio == "vertical" else 75
+        box_padding = 10 if aspect_ratio == "vertical" else 8
+
+        ass_lines = [
+            "[Script Info]",
+            "ScriptType: v4.00+",
+            f"PlayResX: {res_x}",
+            f"PlayResY: {res_y}",
+            "",
+            "[V4+ Styles]",
+            "Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding",
+            f"Style: Default,Arial,{font_size},&H00FFFFFF,&H000000FF,&H00000000,&HB0000000,1,0,0,0,100,100,0,0,3,{box_padding},0,2,30,30,{margin_v},1",
+            "",
+            "[Events]",
+            "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text"
+        ]
+
+        def sec_to_ass(s_val: float) -> str:
+            h = int(s_val // 3600)
+            m = int((s_val % 3600) // 60)
+            s = int(s_val % 60)
+            cs = int(round((s_val - int(s_val)) * 100))
+            if cs >= 100:
+                cs = 99
+            return f"{h}:{m:02d}:{s:02d}.{cs:02d}"
+
+        sf = max(0.01, speed_factor)
+        effective_dur = total_duration / sf
+
+        if timed_cues and len(timed_cues) > 0:
+            for cue in timed_cues:
+                text_clean = str(cue.get("text", "")).strip().replace("\r", " ").replace("\n", " ")
+                if not text_clean:
+                    continue
+                t_s = max(0.0, float(cue.get("start", 0.0))) / sf
+                t_e = min(effective_dur, float(cue.get("end", t_s + 2.5)) / sf)
+                if t_e <= t_s:
+                    t_e = min(effective_dur, t_s + 1.5)
+                start_str = sec_to_ass(t_s)
+                end_str = sec_to_ass(t_e)
+                ass_lines.append(f"Dialogue: 0,{start_str},{end_str},Default,,0,0,0,,{text_clean}")
+        elif scene_subtitles:
+            # Proportional duration based on string length (Syllable/Character-weighted)
+            clean_subs = [s.strip().replace("\r", " ").replace("\n", " ") for s in scene_subtitles if s.strip()]
+            total_chars = sum(max(1, len(s)) for s in clean_subs)
+            curr_time = 0.0
+            for idx, text_snip in enumerate(clean_subs):
+                prop = len(text_snip) / max(1, total_chars)
+                cue_dur = max(1.8, prop * effective_dur)
+                t_s = curr_time
+                t_e = min(effective_dur, t_s + cue_dur)
+                if idx == len(clean_subs) - 1:
+                    t_e = effective_dur
+                if t_e > t_s:
+                    start_str = sec_to_ass(t_s)
+                    end_str = sec_to_ass(t_e)
+                    ass_lines.append(f"Dialogue: 0,{start_str},{end_str},Default,,0,0,0,,{text_snip}")
+                    curr_time = t_e
+
+        try:
+            with open(output_ass_path, "w", encoding="utf-8") as f:
+                f.write("\n".join(ass_lines))
+            return os.path.exists(output_ass_path) and os.path.getsize(output_ass_path) > 50
+        except Exception:
+            return False
+
+    @staticmethod
+    def render_final_explainer(
+        video_source: str,
+        audio_source: str,
+        output_path: str,
+        duration: float,
+        aspect_ratio: str = "vertical",
+        burn_subtitles: bool = True,
+        scene_subtitles: Optional[List[str]] = None,
+        watermark: str = "",
+        part_number: int = 1,
+        num_parts: int = 1,
+        lang: str = "en",
+        **kwargs
+    ) -> bool:
+        """
+        Renders complete production-ready explainer video:
+        - 9:16 Vertical with 100% full-width movie and blurred top/bottom backdrop.
+        - Anti-copyright color grade & synchronized micro-speed drift (PTS/1.02 & atempo=1.02).
+        - Dynamic burned captions with dark pill box via libass (.ass) for flawless RTL Urdu/Arabic shaping.
+        - Channel watermark & optional Part badge for multi-part series.
+        """
+        ffmpeg_bin = get_ffmpeg_binary()
+        font_esc = VideoEngine.get_font_for_lang(lang)
+        font_clause = f":fontfile='{font_esc}'" if font_esc else ""
+
+        filter_parts = []
+        if aspect_ratio == "vertical":
+            filter_parts.append(
+                "[0:v]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,setsar=1,boxblur=24:5,eq=brightness=-0.15[bg];"
+                "[0:v]scale=1080:-2,setsar=1[fg];"
+                "[bg][fg]overlay=(W-w)/2:(H-h)/2[vcomp]"
+            )
+            v_base = "[vcomp]"
+        elif aspect_ratio == "square":
+            filter_parts.append(
+                "[0:v]scale=1080:1080:force_original_aspect_ratio=increase,crop=1080:1080,setsar=1[vcomp]"
+            )
+            v_base = "[vcomp]"
+        else: # Horizontal 16:9
+            filter_parts.append(
+                "[0:v]scale=1920:1080:force_original_aspect_ratio=increase,crop=1920:1080,setsar=1[vcomp]"
+            )
+            v_base = "[vcomp]"
+
+        post_vf = []
+        # Anti-copyright: color grade + speed sync
+        post_vf.append("eq=contrast=1.03:brightness=0.01:saturation=1.06")
+        post_vf.append("setpts=PTS/1.02")
+
+        # Part Badge at top (ONLY render if multi-part series mode is enabled with num_parts > 1)
+        if num_parts > 1 and part_number >= 1:
+            badge_y = "140" if aspect_ratio == "vertical" else "50"
+            badge_text = VideoEngine.escape_ffmpeg_drawtext(f"PART {part_number}")
+            post_vf.append(
+                f"drawtext=text='{badge_text}'{font_clause}:x=(w-text_w)/2:y={badge_y}:fontsize=44:fontcolor=yellow:box=1:boxcolor=black@0.75:boxborderw=10"
+            )
+
+        # Watermark
+        if watermark:
+            clean_wm = VideoEngine.escape_ffmpeg_drawtext(re.sub(r"[^a-zA-Z0-9\s.@_-]", "", watermark))
+            wm_y = "70" if aspect_ratio == "vertical" else "25"
+            post_vf.append(
+                f"drawtext=text='{clean_wm}'{font_clause}:x=(w-text_w)/2:y={wm_y}:fontsize=26:fontcolor=white@0.85"
+            )
+
+        # Dynamic Subtitles via libass (.ass) - eliminates tofu boxes for Urdu, Arabic, Hindi, etc.
+        temp_ass_path = None
+        timed_cues = kwargs.get("timed_cues")
+        if burn_subtitles and (scene_subtitles or timed_cues):
+            out_dir = os.path.dirname(output_path) or str(TEMP_DIR)
+            temp_ass_path = os.path.join(out_dir, f"subs_{uuid.uuid4().hex[:8]}.ass")
+            if VideoEngine.generate_ass_subtitle_file(
+                scene_subtitles=scene_subtitles or [],
+                total_duration=duration,
+                output_ass_path=temp_ass_path,
+                aspect_ratio=aspect_ratio,
+                lang=lang,
+                timed_cues=timed_cues,
+                speed_factor=1.02
+            ):
+                clean_ass = temp_ass_path.replace("\\", "/").replace(":", "\\:")
+                fonts_dir_esc = str(FONTS_DIR.resolve()).replace("\\", "/").replace(":", "\\:")
+                post_vf.append(f"subtitles='{clean_ass}':fontsdir='{fonts_dir_esc}'")
+
+        filter_parts.append(f";{v_base}{','.join(post_vf)}[vfinal]")
+        filter_parts.append(";[1:a]atempo=1.02[afinal]")
+        final_filter = "".join(filter_parts)
+
+        # Exact matched duration for both synchronized streams
+        render_dur = round(duration / 1.02, 2)
+
+        cmd = [
+            ffmpeg_bin, "-y",
+            "-stream_loop", "-1", "-i", video_source,
+            "-i", audio_source,
+            "-filter_complex", final_filter,
+            "-map", "[vfinal]",
+            "-map", "[afinal]",
+            "-c:v", "libx264", "-preset", "fast", "-crf", "22", "-pix_fmt", "yuv420p",
+            "-c:a", "aac", "-b:a", "192k",
+            "-t", str(render_dur),
+            output_path
+        ]
+        try:
+            res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            return res.returncode == 0 and os.path.exists(output_path) and os.path.getsize(output_path) > 1000
+        finally:
+            if temp_ass_path and os.path.exists(temp_ass_path):
+                try: os.remove(temp_ass_path)
+                except Exception: pass
