@@ -11,25 +11,25 @@ def test_language_wpm_matrix_covers_all_supported_languages():
 
 def test_calculate_target_words_language_and_speed_calibration():
     """Verifies target word counts dynamically adapt to selected language and velocity."""
-    # Urdu at +15% fast speed: 10 mins * 185 * 1.15 = 2127.5 -> ~2128
+    # Urdu at +15% fast speed: 10 mins * 132 * 1.15 = 1518
     ur_10 = ScriptEngine.calculate_target_words(10, voice_speed="fast", target_lang="ur")
-    assert 2050 <= ur_10 <= 2200, f"Expected ~2128 words for 10m Urdu, got {ur_10}"
+    assert 1480 <= ur_10 <= 1560, f"Expected ~1518 words for 10m Urdu, got {ur_10}"
 
     # English at +15% fast speed: 10 mins * 150 * 1.15 = 1725
     en_10 = ScriptEngine.calculate_target_words(10, voice_speed="fast", target_lang="en")
     assert 1650 <= en_10 <= 1800, f"Expected ~1725 words for 10m English, got {en_10}"
 
-    # Spanish at +15% fast speed: 10 mins * 170 * 1.15 = 1955
+    # Spanish at +15% fast speed: 10 mins * 165 * 1.15 = 1897.5
     es_10 = ScriptEngine.calculate_target_words(10, voice_speed="fast", target_lang="es")
-    assert 1850 <= es_10 <= 2050, f"Expected ~1955 words for 10m Spanish, got {es_10}"
+    assert 1850 <= es_10 <= 2050, f"Expected ~1898 words for 10m Spanish, got {es_10}"
 
-    # Arabic at normal speed: 5 mins * 140 * 1.0 = 700
+    # Arabic at normal speed: 5 mins * 130 * 1.0 = 650
     ar_5 = ScriptEngine.calculate_target_words(5, voice_speed="normal", target_lang="ar")
-    assert 680 <= ar_5 <= 720, f"Expected ~700 words for 5m Arabic normal, got {ar_5}"
+    assert 630 <= ar_5 <= 670, f"Expected ~650 words for 5m Arabic normal, got {ar_5}"
 
-    # 1 min Hindi at +15% fast speed: 1 min * 180 * 1.15 = 207
+    # 1 min Hindi at +15% fast speed: 1 min * 138 * 1.15 = 158.7 -> 159
     hi_1 = ScriptEngine.calculate_target_words(1, voice_speed="fast", target_lang="hi")
-    assert 200 <= hi_1 <= 220, f"Expected ~207 words for 1m Hindi fast, got {hi_1}"
+    assert 150 <= hi_1 <= 170, f"Expected ~159 words for 1m Hindi fast, got {hi_1}"
 
 def test_prompt_includes_source_video_duration_and_act_quotas():
     """Verifies build_prompt_for_genre includes source video duration context and explicit act quotas."""

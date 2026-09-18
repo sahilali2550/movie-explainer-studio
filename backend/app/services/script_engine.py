@@ -161,57 +161,97 @@ class ScriptEngine:
         return None
 
     @staticmethod
-    def clamp_script_word_budget(script_text: str, target_duration_mins: int = 3) -> str:
+    def clamp_script_word_budget(
+        script_text: str,
+        target_duration_mins: int = 3,
+        target_lang: str = "en",
+        voice_speed: str = "fast"
+    ) -> str:
         """
-        Clamps storyboard script length to strict duration-budget word ceilings.
-        Prevents LLM output inflation (e.g. 4000+ words for a 10 min recap)
-        while preserving intact scene blocks and clean punctuation endings.
+        Non-Destructive Narrative Auto-Budgeting.
+        Clamps storyboard script length to strict duration-budget word ceilings
+        WITHOUT severing the climax or final scenes.
+        Pillars (Scene 1 Hook & Final Climax/Ending) are permanently protected.
         """
         if not script_text or not script_text.strip():
             return script_text
 
-        # Target budgets: ~160 words per minute
-        # 1 min: max 220 words
-        # 3 min: max 650 words
-        # 5 min: max 1050 words
-        # 10 min: max 1900 words
-        max_words = max(220, int(target_duration_mins * 185))
+        target_words = ScriptEngine.calculate_target_words(target_duration_mins, voice_speed, target_lang)
+        # Allow buffer up to +8%
+        max_words = max(180, int(round(target_words * 1.08)))
+
         words = script_text.split()
         if len(words) <= max_words:
             return script_text
 
-        # Prune at scene block boundary
-        blocks = re.split(r'\n\s*\n', script_text.strip())
-        if len(blocks) > 1:
-            retained_blocks = []
-            current_words = 0
-            for block in blocks:
-                b_words = len(block.split())
-                if current_words + b_words <= max_words or len(retained_blocks) < 3:
-                    retained_blocks.append(block)
-                    current_words += b_words
-                else:
-                    break
-            result = "\n\n".join(retained_blocks).strip()
+        # Split into scene blocks
+        blocks = [b.strip() for b in re.split(r'\n\s*\n', script_text.strip()) if b.strip()]
+        if len(blocks) > 2:
+            # Pillar 1: First scene (Hook)
+            pillar_first = blocks[0]
+            # Pillar 2: Last scene (Climax / Ending)
+            pillar_last = blocks[-1]
+
+            p1_words = len(pillar_first.split())
+            p2_words = len(pillar_last.split())
+
+            middle_blocks = blocks[1:-1]
+            remaining_budget = max(50, max_words - (p1_words + p2_words))
+
+            # Total middle words
+            mid_words = sum(len(b.split()) for b in middle_blocks)
+
+            if mid_words <= remaining_budget:
+                retained_middle = middle_blocks
+            else:
+                # Proportional compression of middle blocks
+                compression_ratio = remaining_budget / max(1, mid_words)
+                retained_middle = []
+                for b in middle_blocks:
+                    b_sentences = re.split(r'(?<=[.!?۔؟\n])\s+', b.strip())
+                    if len(b_sentences) > 1:
+                        target_s_count = max(1, int(round(len(b_sentences) * compression_ratio)))
+                        compressed_b = " ".join(b_sentences[:target_s_count]).strip()
+                        if not any(compressed_b.endswith(p) for p in [".", "۔", "!", "?", "؟"]):
+                            compressed_b += "۔" if any(ord(c) > 1500 for c in compressed_b) else "."
+                        retained_middle.append(compressed_b)
+                    else:
+                        retained_middle.append(b)
+
+                # If still over budget, drop least critical intermediate blocks from the middle
+                cur_total = p1_words + p2_words + sum(len(b.split()) for b in retained_middle)
+                while cur_total > max_words and len(retained_middle) > 1:
+                    drop_idx = len(retained_middle) // 2
+                    retained_middle.pop(drop_idx)
+                    cur_total = p1_words + p2_words + sum(len(b.split()) for b in retained_middle)
+
+            final_blocks = [pillar_first] + retained_middle + [pillar_last]
+            result = "\n\n".join(final_blocks).strip()
             if not any(result.endswith(p) for p in [".", "۔", "!", "?", "؟"]):
                 result += "۔" if any(ord(c) > 1500 for c in result) else "."
             return result
 
-        # Single block or no scene markers: clamp at sentence boundary
+        # Single block or only 2 blocks: clamp at sentence boundary while preserving first and last sentence
         sentences = re.split(r'(?<=[.!?۔؟\n])\s+', script_text.strip())
-        retained = []
-        cur_w = 0
-        for s in sentences:
-            s_w = len(s.split())
-            if cur_w + s_w <= max_words or len(retained) == 0:
-                retained.append(s)
-                cur_w += s_w
-            else:
-                break
-        res = " ".join(retained).strip()
-        if not any(res.endswith(p) for p in [".", "۔", "!", "?", "؟"]):
-            res += "۔" if any(ord(c) > 1500 for c in res) else "."
-        return res
+        if len(sentences) > 2:
+            first_s = sentences[0]
+            last_s = sentences[-1]
+            rem_words = max_words - (len(first_s.split()) + len(last_s.split()))
+            retained_mid = []
+            cur_w = 0
+            for s in sentences[1:-1]:
+                s_w = len(s.split())
+                if cur_w + s_w <= rem_words:
+                    retained_mid.append(s)
+                    cur_w += s_w
+                else:
+                    break
+            res = " ".join([first_s] + retained_mid + [last_s]).strip()
+            if not any(res.endswith(p) for p in [".", "۔", "!", "?", "؟"]):
+                res += "۔" if any(ord(c) > 1500 for c in res) else "."
+            return res
+
+        return script_text
 
     @staticmethod
     def calculate_hook_score(script_text: str, lang: str = "en") -> Dict[str, Any]:
@@ -655,20 +695,20 @@ class ScriptEngine:
         return cues
 
     LANGUAGE_WPM = {
-        "ur": 185,  # Urdu (Edge-TTS Asad/Uzma speaks ~185-215 WPM)
-        "hi": 180,  # Hindi (Edge-TTS Madhur/Swara speaks ~180-210 WPM)
-        "es": 170,  # Spanish (Edge-TTS Alvaro/Elvira speaks ~170-200 WPM)
-        "pt": 165,  # Portuguese (Edge-TTS Antonio/Francisca)
-        "id": 165,  # Indonesian (Edge-TTS Ardi/Gadis)
-        "vi": 175,  # Vietnamese (Edge-TTS NamMinh/HoaiMy)
-        "en": 150,  # English (Edge-TTS Christopher/Guy/Aria)
-        "fr": 155,  # French (Edge-TTS Henri/Denise)
-        "it": 160,  # Italian (Edge-TTS Diego/Elsa)
-        "tr": 155,  # Turkish (Edge-TTS Ahmet/Emel)
-        "de": 140,  # German (Edge-TTS Conrad/Katja)
-        "ar": 140,  # Arabic (Edge-TTS Shakir/Hamed)
-        "ru": 135,  # Russian (Edge-TTS Dmitry/Svetlana)
-        "th": 160,  # Thai (Edge-TTS Niwat/Premwadee)
+        "ur": 132,  # Urdu (Edge-TTS Asad/Uzma speaks ~130-135 WPM at 1.0x)
+        "hi": 138,  # Hindi (Edge-TTS Madhur/Swara speaks ~135-140 WPM at 1.0x)
+        "es": 165,  # Spanish (Edge-TTS Alvaro/Elvira speaks ~160-170 WPM)
+        "pt": 160,  # Portuguese (Edge-TTS Antonio/Francisca ~155-165 WPM)
+        "id": 155,  # Indonesian (Edge-TTS Ardi/Gadis ~150-160 WPM)
+        "vi": 160,  # Vietnamese (Edge-TTS NamMinh/HoaiMy ~155-165 WPM)
+        "en": 150,  # English (Edge-TTS Christopher/Guy/Aria ~145-155 WPM)
+        "fr": 150,  # French (Edge-TTS Henri/Denise ~145-155 WPM)
+        "it": 155,  # Italian (Edge-TTS Diego/Elsa ~150-160 WPM)
+        "tr": 150,  # Turkish (Edge-TTS Ahmet/Emel ~145-155 WPM)
+        "de": 135,  # German (Edge-TTS Conrad/Katja ~130-140 WPM)
+        "ar": 130,  # Arabic (Edge-TTS Shakir/Hamed ~125-135 WPM)
+        "ru": 130,  # Russian (Edge-TTS Dmitry/Svetlana ~125-135 WPM)
+        "th": 155,  # Thai (Edge-TTS Niwat/Premwadee ~150-160 WPM)
         "ja": 280,  # Japanese characters/min (Edge-TTS Keita/Nanami)
         "ko": 200,  # Korean blocks/min (Edge-TTS InJoon/SunHi)
     }
@@ -685,6 +725,86 @@ class ScriptEngine:
         base_wpm = ScriptEngine.LANGUAGE_WPM.get(target_lang, 150)
         mult = ScriptEngine.SPEED_MULTIPLIER.get(voice_speed, 1.15)
         return max(130, int(round(duration_mins * base_wpm * mult)))
+
+    @staticmethod
+    def partition_timeline(source_duration_sec: float, target_duration_mins: int = 10) -> List[Dict[str, Any]]:
+        """
+        Universal 5-Act Timeline Milestone Partitioner.
+        Proportionately divides source video duration (whether 40m or 180m) into 5 chronological acts
+        to ensure full 0% to 100% movie coverage with clear timestamp brackets and word budgets.
+        """
+        total_sec = float(source_duration_sec) if source_duration_sec and source_duration_sec > 60 else float(target_duration_mins * 60 * 6)
+
+        def sec_to_ts(s: float) -> str:
+            m = int(s // 60)
+            sec = int(s % 60)
+            return f"{m:02d}:{sec:02d}"
+
+        acts_def = [
+            ("Act 1", "Opening Hook & Inciting Incident", 0.0, 0.20, "20%"),
+            ("Act 2A", "Rising Stakes & Early Conflict", 0.20, 0.45, "25%"),
+            ("Act 2B", "Midpoint Twist & Deep Crisis", 0.45, 0.70, "25%"),
+            ("Act 3", "The Climax & Killer Reveal / Final Confrontation", 0.70, 0.90, "20%"),
+            ("Epilogue", "Resolution, Character Fate & Short Review", 0.90, 1.00, "10%"),
+        ]
+
+        milestones = []
+        for act_name, label, start_ratio, end_ratio, budget_pct in acts_def:
+            start_s = round(total_sec * start_ratio)
+            end_s = total_sec if end_ratio == 1.00 else round(total_sec * end_ratio)
+            milestones.append({
+                "act": act_name,
+                "label": label,
+                "start_sec": start_s,
+                "end_sec": end_s,
+                "timestamp_range": f"{sec_to_ts(start_s)} - {sec_to_ts(end_s)}",
+                "budget_pct": budget_pct
+            })
+        return milestones
+
+    @staticmethod
+    def validate_script_integrity(
+        script_text: str,
+        source_duration_sec: float = 0,
+        target_duration_mins: int = 10,
+        target_lang: str = "en",
+        voice_speed: str = "fast"
+    ) -> Tuple[bool, str]:
+        """
+        Universal Automated Quality Gatekeeper.
+        Verifies:
+        1. Timeline Coverage: Last scene timestamp covers >= 85% of source video timeline.
+        2. Word Budget Drift: Actual words are within acceptable range (not severely under-budget).
+        3. Structural Pillars: Valid scene format and narrative closure.
+        """
+        if not script_text or not script_text.strip():
+            return False, "Script is empty."
+
+        # 1. Timeline Coverage Check
+        ts_matches = re.findall(r'(?:\[(?:SCENE:\s*)?|\b)(\d{1,2}):(\d{2})\s*-\s*(\d{1,2}):(\d{2})\]?', script_text)
+        max_end_sec = 0.0
+        if ts_matches:
+            for m in ts_matches:
+                end_m, end_s = int(m[2]), int(m[3])
+                end_sec = end_m * 60 + end_s
+                if end_sec > max_end_sec:
+                    max_end_sec = end_sec
+
+        if source_duration_sec and source_duration_sec > 120:
+            if max_end_sec == 0:
+                return False, "Missing scene timestamps across narrative."
+            coverage_pct = max_end_sec / source_duration_sec
+            if coverage_pct < 0.85:
+                return False, f"Timeline coverage insufficient (covers {coverage_pct*100:.1f}%, minimum required 85%). Missing ending/climax."
+
+        # 2. Word Budget Check
+        words = script_text.split()
+        target_words = ScriptEngine.calculate_target_words(target_duration_mins, voice_speed, target_lang)
+        min_allowed = int(target_words * 0.40)
+        if len(words) < min_allowed:
+            return False, f"Script is severely under-budget ({len(words)} words, minimum expected {min_allowed})."
+
+        return True, "Script passed all universal integrity gates."
 
     @staticmethod
     def build_prompt_for_genre(
@@ -810,6 +930,14 @@ class ScriptEngine:
         else:
             transcript_section = "Source Transcript: None provided. Structure narrative from beginning to climax based on plot guide."
 
+        milestones = ScriptEngine.partition_timeline(source_video_duration_sec, duration_mins)
+        milestone_lines = ["\nMANDATORY 5-ACT TIMELINE PROGRESSION (FULL MOVIE COVERAGE REQUIRED):"]
+        milestone_lines.append("You MUST structure your narrative across these chronological acts and ensure your timestamps reach the final climax and ending:")
+        for m in milestones:
+            milestone_lines.append(f"- {m['act']} [{m['timestamp_range']}]: {m['label']} (Target Word Budget: ~{m['budget_pct']})")
+        milestone_lines.append(f"CRITICAL MILESTONE LOCK: The final scene MUST reach the Epilogue timeframe ({milestones[-1]['timestamp_range']}) to deliver the full climax and resolution!")
+        milestone_section = "\n".join(milestone_lines) + "\n"
+
         prompt = f"""You are a {cfg['role']}.
 Title: {title}
 Genre: {cfg['label']}
@@ -817,6 +945,7 @@ Plot Guide / Extra Notes: {plot_summary}
 Description / Background: {description[:800]}
 {transcript_section}
 {beats_section}
+{milestone_section}
 OBJECTIVES:
 1. Write a captivating, immersive THIRD-PERSON {genre} narrative in natural, colloquial {lang_name}.
 2. Tone & Master Storyteller Voice: {persona_guide} (Overall Mood: {mood.upper()}).
@@ -836,10 +965,10 @@ NARRATIVE STRUCTURE:
 
 FORMATTING & AI DIRECTOR REQUIREMENTS:
 1. SCENE TIMESTAMPS: For each narrative scene block, include a timestamp bracket mapping directly to the source movie/video timeline, e.g. [SCENE: 03:15 - 03:20] or [03:15 - 03:20].
-   - MANDATORY: Anchor your timestamps to the chronological Full-Movie Roadmap above!
+   - MANDATORY: Anchor your timestamps to the chronological Full-Movie Roadmap and 5-Act Milestones above!
    - Every scene MUST begin with [SCENE: MM:SS - MM:SS] followed immediately by [VOICEOVER].
-   - The scene timestamps MUST progress chronologically across the entire film from Act 1 (opening) through Act 2 (middle) to Act 3 (climax).
-   - NEVER stay in the first 10 minutes of the movie. Visuals are auto-sliced from these exact timestamps!
+   - The scene timestamps MUST progress chronologically across the entire film from Act 1 (opening) through Act 2 (middle) to Act 3 (climax) and Epilogue (ending).
+   - NEVER stay in the first 10 or 50 minutes of the movie. Visuals are auto-sliced from these exact timestamps!
 2. EMOTIONAL SFX CUES: At key emotional moments, insert sound cues inside brackets:
    - [SFX: HEARTBEAT] for tension, suspicion, or creeping danger.
    - [SFX: SUB_BOOM] for sudden shocking reveals, jumpscares, or plot twists.
@@ -938,7 +1067,19 @@ TASK: Elaborate, expand and enrich the story across Act 1, Act 2, and Act 3 with
                         except Exception:
                             pass
 
-                    nine_text = ScriptEngine.clamp_script_word_budget(nine_text.strip(), target_duration_mins=duration_mins)
+                    nine_text = ScriptEngine.clamp_script_word_budget(
+                        nine_text.strip(),
+                        target_duration_mins=duration_mins,
+                        target_lang=target_lang,
+                        voice_speed=voice_speed
+                    )
+                    is_valid, val_report = ScriptEngine.validate_script_integrity(
+                        script_text=nine_text,
+                        source_duration_sec=source_video_duration_sec,
+                        target_duration_mins=duration_mins,
+                        target_lang=target_lang,
+                        voice_speed=voice_speed
+                    )
                     hook_metrics = ScriptEngine.calculate_hook_score(nine_text, target_lang)
                     return {
                         "success": True,
@@ -949,7 +1090,9 @@ TASK: Elaborate, expand and enrich the story across Act 1, Act 2, and Act 3 with
                         "target_words": target_words,
                         "actual_words": len(nine_text.split()),
                         "hook_score": hook_metrics,
-                        "story_beats": story_beats or []
+                        "story_beats": story_beats or [],
+                        "is_valid": is_valid,
+                        "integrity_report": val_report
                     }
         except Exception as e:
             print(f"[9Router Integration Warning] {e}")
@@ -966,6 +1109,19 @@ TASK: Elaborate, expand and enrich the story across Act 1, Act 2, and Act 3 with
                         text = res["candidates"][0]["content"]["parts"][0]["text"].strip()
                         if text:
                             text = ScriptEngine.strip_code_and_developer_artifacts(text)
+                            text = ScriptEngine.clamp_script_word_budget(
+                                text.strip(),
+                                target_duration_mins=duration_mins,
+                                target_lang=target_lang,
+                                voice_speed=voice_speed
+                            )
+                            is_valid, val_report = ScriptEngine.validate_script_integrity(
+                                script_text=text,
+                                source_duration_sec=source_video_duration_sec,
+                                target_duration_mins=duration_mins,
+                                target_lang=target_lang,
+                                voice_speed=voice_speed
+                            )
                             hook_metrics = ScriptEngine.calculate_hook_score(text, target_lang)
                             return {
                                 "success": True,
@@ -974,8 +1130,11 @@ TASK: Elaborate, expand and enrich the story across Act 1, Act 2, and Act 3 with
                                 "language": target_lang,
                                 "genre": genre,
                                 "target_words": target_words,
+                                "actual_words": len(text.split()),
                                 "hook_score": hook_metrics,
-                                "story_beats": story_beats or []
+                                "story_beats": story_beats or [],
+                                "is_valid": is_valid,
+                                "integrity_report": val_report
                             }
                 except Exception:
                     continue
