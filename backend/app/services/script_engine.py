@@ -956,9 +956,9 @@ class ScriptEngine:
         clean_narr, _, _ = ScriptEngine.parse_storyboard(script_text)
         spoken_words = len(clean_narr.split()) if clean_narr else len(script_text.split())
         target_words = ScriptEngine.calculate_target_words(target_duration_mins, voice_speed, target_lang)
-        min_allowed = int(target_words * 0.40)
+        min_allowed = int(target_words * 0.75) if target_duration_mins >= 5 else int(target_words * 0.60)
         if spoken_words < min_allowed:
-            return False, f"Script is severely under-budget ({spoken_words} spoken words, minimum expected {min_allowed})."
+            return False, f"Script is severely under-budget ({spoken_words} spoken words, minimum expected {min_allowed} for {target_duration_mins}m video)."
 
         return True, "Script passed all universal integrity gates."
 
@@ -1018,55 +1018,56 @@ class ScriptEngine:
                 "structure": f"""- Opening Hook (First 5 seconds): The chilling crime scene, shocking disappearance, or forensic contradiction.
 - Act 1 (~{act1_words} words): The Incident & First 48 Hours, timeline of disappearance/crime, and initial suspects.
 - Act 2 (~{act2_words} words): Cold Case Reopened & Forensic Clues, digital forensics, DNA revelations, and interrogations.
-- Act 3 (~{act3_words} words): The Verdict or Lingering Mystery, judicial trial, justice served, or open questions.
-- Call to Action: Outro asking viewers for their theory on the case and to subscribe!"""
+- Act 3 (~{act3_words} words): The Trial, Final Confession / Verdict, and unsolved questions.
+- Call to Action: Gripping outro inviting viewers to discuss theories in comments!"""
             },
             "tech_science": {
-                "role": f"Elite Tech & Business Explainer / Video Essayist in {lang_name} ({lang_info['native']})",
-                "label": "Tech / Business Case Study & Video Essay",
-                "structure": f"""- Opening Hook (First 5 seconds): The billion-dollar mistake, breakthrough invention, or counter-intuitive insight.
-- Act 1 (~{act1_words} words): The Hidden Problem & Origin, why the old model was broken and the race to innovate.
-- Act 2 (~{act2_words} words): The Breakthrough & Strategic Wars, engineering challenges, high-stakes decisions, and market disruptors.
-- Act 3 (~{act3_words} words): The Future Impact, macro-takeaway, and life/business lesson.
-- Call to Action: Outro asking viewers their stance and to subscribe for high-impact case studies!"""
+                "role": f"Visionary Tech & Science Chronicler in {lang_name} ({lang_info['native']})",
+                "label": "Science, Technology & Future Innovation",
+                "structure": f"""- Opening Hook (First 5 seconds): The mind-bending breakthrough, paradigm shift, or existential threat.
+- Act 1 (~{act1_words} words): The Problem / Origin Story, why previous paradigms failed, and the breakthrough idea.
+- Act 2 (~{act2_words} words): How It Works & Engineering Genius, the breakthroughs, obstacles, and revolutionary tech.
+- Act 3 (~{act3_words} words): Future Impact & Society, ethical questions, what happens next.
+- Call to Action: Exciting closing inviting viewers to share what tech they want explained next!"""
             },
             "video_essay": {
-                "role": f"Elite Video Essayist & Case Study Analyst in {lang_name} ({lang_info['native']})",
-                "label": "Video Essay & Tech / Business Case Study",
-                "structure": f"""- Opening Hook (First 5 seconds): A counter-intuitive truth or billion-dollar question that challenges common knowledge.
-- Act 1 (~{act1_words} words): The Context & Illusion, why everyone believed the status quo before everything changed.
-- Act 2 (~{act2_words} words): The Mechanics & Strategic Play, dissecting key decisions, hidden forces, and pivotal pivots.
-- Act 3 (~{act3_words} words): The Master Takeaway, macro-impact, future predictions, and unforgettable moral.
-- Call to Action: Dynamic call for viewers to share their perspective and subscribe!"""
+                "role": f"Master Cultural Critic & Visual Essayist in {lang_name} ({lang_info['native']})",
+                "label": "Cultural Video Essay & Philosophy",
+                "structure": f"""- Opening Hook (First 5 seconds): The central paradox or cultural critique that challenges common beliefs.
+- Act 1 (~{act1_words} words): The Thesis & Cultural Context, breaking down the illusion.
+- Act 2 (~{act2_words} words): The Evidence, cinematic/historical parallels, psychology, and hidden motifs.
+- Act 3 (~{act3_words} words): The Synthesis, why this matters today, and philosophical takeaway.
+- Call to Action: Thoughtful closing question to spark high-engagement comments!"""
             },
             "movie_recap": {
-                "role": f"World-Class Viral Movie & Drama Recap Narrator in {lang_name} ({lang_info['native']})",
-                "label": "Movie / Drama Recap Story",
-                "structure": f"""- Opening Hook (First 5 seconds): A jaw-dropping cliffhanger statement that hooks the audience immediately.
-- Act 1 (~{act1_words} words): The protagonist's desperate dilemma and the inciting event.
-- Act 2 (~{act2_words} words): Escalating confrontations, hidden motives, and sudden twists.
-- Act 3 (~{act3_words} words): The shocking climax or cliffhanger reveal.
-- Call to Action: Punchy outro to Follow/Subscribe for the next movie story!"""
+                "role": f"Master Hollywood Cinema Storyteller & Explainer in {lang_name} ({lang_info['native']})",
+                "label": "Cinematic Movie Story Recap",
+                "structure": f"""- Opening Hook (First 5 seconds): The high-stakes inciting incident or intense teaser moment.
+- Act 1 (~{act1_words} words): Protagonist introduction, world setup, the inciting event, and initial stakes.
+- Act 2 (~{act2_words} words): The Escalation, rising tension, plot twists, betrayals, and deep crisis.
+- Act 3 (~{act3_words} words): The Climax, ultimate confrontation, killer/mastermind reveal, and full resolution.
+- Short Review & Outro: A 15-20 second review & moral takeaway followed by like & subscribe call-to-action!"""
             }
         }
 
         cfg = genre_configs.get(genre, genre_configs["movie_recap"])
-        spoiler_rule = "NARRATE THE COMPLETE STORY ARC INCLUDING THE FULL CLIMAX & ENDING." if spoiler_mode == "full_recap" else "STOP RIGHT BEFORE THE FINAL TWIST! End on an intense cliffhanger asking viewers to watch the full content!"
 
-        persona_guide = {
-            "hollywood_trailer": "Deliver like a legendary Hollywood trailer narrator: breathless suspense, intense stakes, dramatic pauses, high cinematic momentum.",
-            "viral_fast": "Fast, high-energy TikTok/Reels narration! Short, punchy, active sentences that grab attention instantly and refuse to let go.",
-            "sarcastic_roaster": "Witty and slightly humorous recap! Point out weird character choices and ridiculous tropes while still telling the thrilling story.",
-            "documentary": "Dark, investigative, true-crime documentary tone. Serious, analytical, peeling back layers of the mystery."
-        }.get(persona, "Fast, high-energy, suspenseful viral storytelling.")
+        persona_map = {
+            "hollywood_trailer": "Epic, dramatic, cinematic, high-stakes with breathless pacing.",
+            "viral_fast": "Hyper-fast, punchy, high-energy, modern TikTok/Reels retention style.",
+            "sarcastic_roaster": "Witty, humorous, sarcastic commentary pointing out absurd plot choices.",
+            "documentary": "Serious, objective, chilling, investigative tone like true crime docuseries."
+        }
+        persona_guide = persona_map.get(persona, persona_map["hollywood_trailer"])
+
+        spoiler_rule = "Deliver the complete ending, final plot twists, and character fates clearly without withholding information." if spoiler_mode == "full_recap" else "Build maximum suspense up to the final cliffhanger without revealing the ultimate ending!"
 
         beats_section = ""
         if story_beats:
-            beats_lines = ["\nCHRONOLOGICAL STORY BEATS (MANDATORY ALIGNMENT):"]
-            beats_lines.append("You MUST structure your narrative script around these exact story beats and use their timestamps for corresponding scenes:")
+            beats_lines = ["\nChronological Story Beats Detected by Detective Agent:"]
             for b in story_beats:
                 beat_num = b.get("beat", "")
-                ts = b.get("timestamp", "")
+                ts = b.get("time_range") or b.get("timestamp", "")
                 btitle = b.get("title", "")
                 action = b.get("action", "")
                 line = f"- Beat {beat_num} [{ts}]: {btitle}"
@@ -1113,7 +1114,8 @@ OBJECTIVES:
 - Act 3 Target: ~{act3_words} words
 5. Ending Rule & Short Review: {spoiler_rule}
    - In the final 15-20 seconds of Act 3, provide a punchy conclusion and short review / moral takeaway summarizing the core theme or fate of the characters before the call-to-action!
-6. STRICT ANTI-CODE RULE: Do NOT include code blocks, python scripts, unit tests, or markdown backticks under any circumstance. Output pure spoken storytelling narration.
+6. DIALOGUE & CHARACTER QUOTING: You MUST naturally quote and reference key dialogues and character exchanges throughout the story (e.g. hero shouts: 'Get out of the way!' while firing; heroine reveals the truth: 'He was never on our side'; villain threatens...). Narrate critical turning-point actions (explosions, gunfire, car chases, confrontations) at their exact timestamps from the roadmap. This creates an authentic, emotionally charged story and guarantees perfect synchronization with the movie footage.
+7. STRICT ANTI-CODE RULE: Do NOT include code blocks, python scripts, unit tests, or markdown backticks under any circumstance. Output pure spoken storytelling narration.
 {source_pacing_note}
 
 NARRATIVE STRUCTURE:
@@ -1270,6 +1272,22 @@ TASK: Elaborate, expand and enrich the story across Act 1, Act 2, and Act 3 with
                         text = res["candidates"][0]["content"]["parts"][0]["text"].strip()
                         if text:
                             text = ScriptEngine.strip_code_and_developer_artifacts(text)
+                            clean_test_g, _, _ = ScriptEngine.parse_storyboard(text)
+                            actual_words_g = len(clean_test_g.split())
+
+                            # Auto-Expansion Loop for Gemini: If returned script is under 80% of target for long videos (>=3 mins)
+                            if duration_mins >= 3 and actual_words_g < int(target_words * 0.80):
+                                exp_res = ScriptEngine.expand_script(
+                                    current_script=text,
+                                    target_lang=target_lang,
+                                    duration_mins=duration_mins,
+                                    voice_speed=voice_speed,
+                                    genre=genre,
+                                    gemini_api_key=api_key
+                                )
+                                if exp_res.get("success") and exp_res.get("script") and len(exp_res["script"].split()) > actual_words_g:
+                                    text = exp_res["script"]
+
                             text = ScriptEngine.clamp_script_word_budget(
                                 text.strip(),
                                 target_duration_mins=duration_mins,
@@ -1393,7 +1411,8 @@ Follow dan like sekarang untuk kelanjutan kisah menegangkan ini!""",
         target_lang: str = "en",
         duration_mins: int = 10,
         voice_speed: str = "fast",
-        genre: str = "movie_recap"
+        genre: str = "movie_recap",
+        gemini_api_key: Optional[str] = None
     ) -> Dict[str, Any]:
         """Expands an existing script to reach the full target word count."""
         target_words = ScriptEngine.calculate_target_words(duration_mins, voice_speed, target_lang)
@@ -1414,6 +1433,7 @@ EXPANSION INSTRUCTIONS:
 4. Maintain milestone scene timestamp brackets like [01:15 - 02:30].
 Return the complete, expanded storyboard narrative."""
 
+        # 1. 9Router expansion
         try:
             from app.services.nine_router_client import is_ninerouter_available, call_ninerouter_llm
             if is_ninerouter_available(timeout_sec=8.0):
@@ -1430,7 +1450,32 @@ Return the complete, expanded storyboard narrative."""
                         "hook_score": hook_metrics
                     }
         except Exception as e:
-            print(f"[expand_script error] {e}")
+            print(f"[expand_script 9Router error] {e}")
+
+        # 2. Gemini expansion fallback
+        api_key = gemini_api_key or os.environ.get("GEMINI_API_KEY", "")
+        if api_key:
+            for model in ["gemini-2.0-flash", "gemini-1.5-flash"]:
+                url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}"
+                payload = json.dumps({"contents": [{"parts": [{"text": prompt}]}]}).encode("utf-8")
+                req = urllib.request.Request(url, data=payload, headers={"Content-Type": "application/json"})
+                try:
+                    with urllib.request.urlopen(req, timeout=45) as resp:
+                        res = json.loads(resp.read().decode("utf-8"))
+                        text = res["candidates"][0]["content"]["parts"][0]["text"].strip()
+                        if text:
+                            text = ScriptEngine.strip_code_and_developer_artifacts(text)
+                            hook_metrics = ScriptEngine.calculate_hook_score(text, target_lang)
+                            return {
+                                "success": True,
+                                "script": text.strip(),
+                                "target_words": target_words,
+                                "actual_words": len(text.split()),
+                                "hook_score": hook_metrics
+                            }
+                except Exception as ge:
+                    print(f"[expand_script Gemini error] {ge}")
+                    continue
 
         return {"success": False, "error": "LLM expansion unavailable", "script": current_script}
 

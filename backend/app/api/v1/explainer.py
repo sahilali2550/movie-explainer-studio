@@ -713,6 +713,7 @@ async def render_batch_endpoint(
     audio_mode: str = Form("hybrid"),
     scripts_json: Optional[str] = Form(None),
     voices_json: Optional[str] = Form(None),
+    transcript_text: Optional[str] = Form(None),
     local_file: Optional[UploadFile] = File(None)
 ):
     """
@@ -726,6 +727,22 @@ async def render_batch_endpoint(
     lang_list = [l.strip() for l in languages.split(",") if l.strip() and l.strip() in SUPPORTED_LANGUAGES]
     if not lang_list:
         lang_list = ["en"]
+
+    # Parse dialogue timeline from transcript if provided
+    dialogue_timeline = []
+    raw_trans = (transcript_text or "").strip()
+    if raw_trans:
+        parsed_trans = VideoEngine.parse_raw_transcript_text(raw_trans)
+        dialogue_timeline = parsed_trans.get("dialogue_timeline", [])
+    elif url and VideoEngine.is_valid_youtube_url(url):
+        try:
+            info = VideoEngine.extract_youtube_info(url, str(TEMP_DIR), job_id)
+            subs_raw = info.get("subtitles_text", "")
+            if subs_raw:
+                parsed_trans = VideoEngine.parse_raw_transcript_text(subs_raw)
+                dialogue_timeline = parsed_trans.get("dialogue_timeline", [])
+        except Exception:
+            pass
 
     # Parse pre-translated scripts and custom voices if provided
     pre_scripts: Dict[str, str] = {}
@@ -780,7 +797,7 @@ async def render_batch_endpoint(
             await VoiceEngine.synthesize_speech(clean_base_narr, base_voice, base_speech_path, rate=rate_val, pitch="-12Hz")
             base_duration = VideoEngine.get_duration(base_speech_path) if os.path.exists(base_speech_path) else 60.0
             base_speech_cues = VoiceEngine.get_speech_cues(base_speech_path)
-            base_scene_blocks = ScriptEngine.parse_storyboard_blocks(base_script)
+            base_scene_blocks = ScriptEngine.parse_storyboard_blocks(base_script, dialogue_timeline=dialogue_timeline)
             if base_scene_blocks:
                 base_scene_blocks = ScriptEngine.assign_narration_timing(base_scene_blocks, base_duration, base_speech_cues)
 
@@ -973,7 +990,7 @@ async def render_batch_endpoint(
 
                     speech_dur = VideoEngine.get_duration(speech_path)
                     speech_cues = VoiceEngine.get_speech_cues(speech_path)
-                    loc_scene_blocks = ScriptEngine.parse_storyboard_blocks(localized_script)
+                    loc_scene_blocks = ScriptEngine.parse_storyboard_blocks(localized_script, dialogue_timeline=dialogue_timeline)
                     if loc_scene_blocks:
                         loc_scene_blocks = ScriptEngine.assign_narration_timing(loc_scene_blocks, speech_dur, speech_cues)
 

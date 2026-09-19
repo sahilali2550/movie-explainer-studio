@@ -131,7 +131,8 @@ class AgentSwarmEngine:
         speech_velocity: str,
         story_beats: List[Dict[str, Any]],
         notes: str = "",
-        subs_text: str = ""
+        subs_text: str = "",
+        source_video_duration_sec: float = 0.0
     ) -> Dict[str, Any]:
         """
         Generates narrative storyboard script strictly anchored to story beats and transcript,
@@ -148,7 +149,8 @@ class AgentSwarmEngine:
             duration_mins=duration_minutes,
             voice_speed=speech_velocity,
             plot_summary=notes,
-            story_beats=story_beats
+            story_beats=story_beats,
+            source_video_duration_sec=source_video_duration_sec
         )
 
     # =========================================================================
@@ -158,8 +160,19 @@ class AgentSwarmEngine:
     def hook_critic_agent(script_text: str, target_lang: str = "en") -> Dict[str, Any]:
         """
         Evaluates the opening 15 seconds against viral retention metrics.
-        If score < 88%, automatically rewrites the opening sentences to achieve 90+ Viral Grade.
+        If score < 88%, automatically rewrites ONLY the opening 2-3 sentences to achieve 90+ Viral Grade.
+        CRITICAL ARCHITECTURE: Operates ONLY on the opening hook sentences and splices them back in,
+        guaranteeing that remaining scene blocks, climax, and ending are NEVER truncated or lost.
         """
+        if not script_text or not script_text.strip():
+            return {
+                "original_score": 0,
+                "final_score": 0,
+                "rating": "Empty",
+                "optimized_script": script_text,
+                "upgraded": False
+            }
+
         initial_hook = ScriptEngine.calculate_hook_score(script_text, target_lang)
         original_score = initial_hook.get("score", 65)
 
@@ -172,40 +185,76 @@ class AgentSwarmEngine:
                 "upgraded": False
             }
 
-        # Auto-upgrade the hook
+        # Identify opening narration passage to rewrite
+        # Find first VOICEOVER or first paragraph
+        vo_match = re.search(r'\[VOICEOVER\]\s*\n?([^\n\[]+)', script_text, re.IGNORECASE)
+        if vo_match:
+            opening_narration = vo_match.group(1).strip()
+            opening_span = vo_match.span(1)
+        else:
+            first_block = script_text.strip().split("\n\n")[0]
+            clean_first = re.sub(r'\[.*?\]', '', first_block).strip()
+            opening_narration = clean_first[:300] if clean_first else script_text[:200]
+            opening_span = None
+
+        # Extract first 2-3 sentences of the opening
+        sentences = [s.strip() for s in re.split(r'(?<=[.!?۔؟])\s+', opening_narration) if s.strip()]
+        opening_to_rewrite = " ".join(sentences[:3]) if sentences else opening_narration
+
         system_prompt = (
             "You are the Viral Hook & Retention Critic for YouTube Explainer Videos.\n"
-            "Your task is to REWRITE ONLY the opening 2 to 3 sentences of the provided script to maximize curiosity gap, "
+            "Your task is to REWRITE ONLY the provided 2 to 3 opening sentences to maximize curiosity gap, "
             "psychological stakes, and suspense. Keep the language in the original script's language.\n"
-            "Do NOT add any greetings. Start immediately with high intensity. "
-            "Return the entire script with the improved opening."
+            "Do NOT add any greetings, explanations, or quotes. Output ONLY the rewritten opening sentences."
         )
 
-        user_prompt = f"Script to optimize:\n{script_text}"
-        improved_text = AgentSwarmEngine._call_9router(user_prompt, system_prompt=system_prompt, max_tokens=1500)
+        user_prompt = f"Rewrite these opening sentences into a high-retention viral hook:\n{opening_to_rewrite}"
+        improved_hook = AgentSwarmEngine._call_9router(user_prompt, system_prompt=system_prompt, max_tokens=300)
+        if improved_hook:
+            improved_hook = re.sub(r'^["\']|["\']$', '', improved_hook.strip())
+            improved_hook = re.sub(r'```.*?```', '', improved_hook, flags=re.DOTALL).strip()
 
-        if improved_text:
-            upgraded_hook = ScriptEngine.calculate_hook_score(improved_text, target_lang)
+        if improved_hook and len(improved_hook) > 15:
+            # Splice the improved hook back into script_text without touching the rest of the script
+            if vo_match and opening_span:
+                # Replace opening_to_rewrite inside the first VOICEOVER block
+                orig_block_text = script_text[opening_span[0]:opening_span[1]]
+                if opening_to_rewrite in orig_block_text:
+                    new_block_text = orig_block_text.replace(opening_to_rewrite, improved_hook, 1)
+                else:
+                    new_block_text = improved_hook + " " + orig_block_text
+                upgraded_text = script_text[:opening_span[0]] + new_block_text + script_text[opening_span[1]:]
+            else:
+                if opening_to_rewrite in script_text:
+                    upgraded_text = script_text.replace(opening_to_rewrite, improved_hook, 1)
+                else:
+                    upgraded_text = improved_hook + "\n\n" + script_text
+
+            upgraded_hook = ScriptEngine.calculate_hook_score(upgraded_text, target_lang)
             final_score = max(original_score + 15, upgraded_hook.get("score", 90))
             return {
                 "original_score": original_score,
                 "final_score": min(98, final_score),
                 "rating": "Viral Platinum 🔥",
-                "optimized_script": improved_text,
+                "optimized_script": upgraded_text,
                 "upgraded": True
             }
 
-        # Local fallback hook upgrade
+        # Local fallback hook upgrade (Non-destructive prefix insertion)
         hook_prefixes = {
             "ur": "یہ وہ راز ہے جسے چھپانے کے لیے کئی جانیں قربان کی گئیں۔ ",
-            "hi": "यह वो भयानक सच है जिसे छुपाने के लिए कई लोगों की जान ले ली गई। ",
+            "hi": "यह वो भयानक सच है जिसे छुपाने के लिए कई लोगों की जान لے لی گئی۔ ",
             "es": "Nadie imaginó que este secreto terminaría en una pesadilla mortal. ",
             "en": "Nobody could have predicted the deadly conspiracy hidden behind this truth. "
         }
         prefix = hook_prefixes.get(target_lang, hook_prefixes["en"])
-        upgraded_text = prefix + script_text
-        upgraded_hook = ScriptEngine.calculate_hook_score(upgraded_text, target_lang)
 
+        if vo_match and opening_span:
+            upgraded_text = script_text[:opening_span[0]] + prefix + script_text[opening_span[0]:]
+        else:
+            upgraded_text = prefix + script_text
+
+        upgraded_hook = ScriptEngine.calculate_hook_score(upgraded_text, target_lang)
         return {
             "original_score": original_score,
             "final_score": max(88, upgraded_hook.get("score", 90)),
@@ -364,6 +413,16 @@ class AgentSwarmEngine:
           Step 3: Storyboard Validation & 1-Retry Regeneration if anchors are missing/clustered.
           Step 4: Agent 3 (Hook Critic) evaluates & auto-upgrades the narrative.
         """
+        # Extract true source movie duration from transcript if available
+        source_dur = 0.0
+        if transcript_text:
+            try:
+                from app.services.video_engine import VideoEngine
+                p_trans = VideoEngine.parse_raw_transcript_text(transcript_text)
+                source_dur = p_trans.get("total_duration", 0.0)
+            except Exception:
+                pass
+
         # Step 1: Detective Agent
         context = await asyncio.to_thread(
             AgentSwarmEngine.detective_agent,
@@ -387,7 +446,8 @@ class AgentSwarmEngine:
             speech_velocity,
             story_beats,
             notes,
-            transcript_text
+            transcript_text,
+            source_dur
         )
         art_task = asyncio.to_thread(
             AgentSwarmEngine.art_director_agent,
@@ -407,7 +467,8 @@ class AgentSwarmEngine:
         # Step 3: Storyboard Alignment Validation & 1-Retry Loop
         raw_script = script_res.get("script", "") if script_res else ""
         _, scene_ranges, _ = ScriptEngine.parse_storyboard(raw_script)
-        is_valid, val_reason = AgentSwarmEngine.validate_storyboard(scene_ranges, duration_minutes * 60.0)
+        eval_movie_dur = source_dur if source_dur > 120.0 else (duration_minutes * 60.0 * 6.0)
+        is_valid, val_reason = AgentSwarmEngine.validate_storyboard(scene_ranges, eval_movie_dur)
 
         if not is_valid and transcript_text:
             print(f"[AgentSwarm] Storyboard validation notice: {val_reason}. Re-prompting Screenwriter for timestamp alignment...")
@@ -422,7 +483,8 @@ class AgentSwarmEngine:
                 speech_velocity,
                 story_beats,
                 retry_notes,
-                transcript_text
+                transcript_text,
+                source_dur
             )
             if retry_script_res and retry_script_res.get("script"):
                 raw_script = retry_script_res.get("script")
