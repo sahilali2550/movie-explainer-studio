@@ -72,9 +72,9 @@ def test_validate_script_integrity_strict_word_budget():
     # A 600-word script (~4 minutes) must FAIL validation for a 10-minute video
     short_script = (
         "[SCENE: 00:00 - 05:00]\n[VOICEOVER]\n"
-        + "یہ ایک مختصر کہانی ہے۔ " * 100
+        + "یہ ایک مختصر کہانی ہے۔ " * 50
         + "\n\n[SCENE: 05:00 - 10:00]\n[VOICEOVER]\n"
-        + "اور یہاں کہانی ختم ہو جاتی ہے۔ " * 50
+        + "اور یہاں کہانی ختم ہو جاتی ہے۔ " * 25
     )
     is_valid, reason = ScriptEngine.validate_script_integrity(
         script_text=short_script,

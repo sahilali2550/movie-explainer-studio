@@ -350,6 +350,33 @@ class ThumbnailEngine:
         return img
 
     @staticmethod
+    def generate_viral_thumbnails(
+        video_path: str,
+        job_id: str,
+        movie_title: str,
+        lang: str = "en",
+        custom_hooks: Optional[List[str]] = None,
+        target_timestamps: Optional[List[float]] = None,
+        plot_summary: str = "",
+        ai_image_path: Optional[str] = None,
+        youtube_url: Optional[str] = None,
+        openai_api_key: Optional[str] = None
+    ) -> List[Dict[str, Any]]:
+        """Alias for generate_3_thumbnail_options."""
+        return ThumbnailEngine.generate_3_thumbnail_options(
+            video_path=video_path,
+            job_id=job_id,
+            movie_title=movie_title,
+            lang=lang,
+            custom_hooks=custom_hooks,
+            target_timestamps=target_timestamps,
+            plot_summary=plot_summary,
+            ai_image_path=ai_image_path,
+            youtube_url=youtube_url,
+            openai_api_key=openai_api_key
+        )
+
+    @staticmethod
     def generate_3_thumbnail_options(
         video_path: str,
         job_id: str,
@@ -358,13 +385,15 @@ class ThumbnailEngine:
         custom_hooks: Optional[List[str]] = None,
         target_timestamps: Optional[List[float]] = None,
         plot_summary: str = "",
-        ai_image_path: Optional[str] = None
+        ai_image_path: Optional[str] = None,
+        youtube_url: Optional[str] = None,
+        openai_api_key: Optional[str] = None
     ) -> List[Dict[str, Any]]:
         """
         Generates 3 distinct viral thumbnail options:
-        1. 9Router AI Photorealistic Cinema Poster Art (Matching movie story and characters)
+        1. OpenAI DALL-E 3 / 9Router AI Photorealistic Cinema Poster Art
         2. Real Climax Keyframe with Sharp Face & Emotion Grading
-        3. Dramatic Mystery / Confrontation Reveal
+        3. Dramatic Confrontation / Official YouTube High-Res Poster Remix
         """
         temp_prefix = str(THUMBNAILS_DIR / f"{job_id}_raw")
         raw_candidates = ThumbnailEngine.extract_candidate_frames(
@@ -411,9 +440,30 @@ class ThumbnailEngine:
             except Exception:
                 hooks = ["THE SHOCKING TWIST!", "THE TRUTH REVEALED!", "NOBODY SAW THIS COMING!"]
 
-        # Try generating photorealistic AI cinema poster for Variation 1
+        # Fetch official YouTube high-res viral thumbnail if url provided
+        yt_thumb_path = None
+        if youtube_url:
+            try:
+                candidate_yt_path = str(THUMBNAILS_DIR / f"{job_id}_yt_ref.jpg")
+                yt_thumb_path = ThumbnailEngine.fetch_youtube_viral_thumbnail(youtube_url, candidate_yt_path)
+            except Exception:
+                yt_thumb_path = None
+
+        # Try generating photorealistic AI cinema poster (DALL-E 3 or 9Router)
         gen_ai_path = ai_image_path
         if not gen_ai_path or not os.path.exists(gen_ai_path):
+            # 1. Try DALL-E 3 first
+            try:
+                from app.services.openai_client import is_openai_available, generate_ai_image_with_dalle
+                if is_openai_available() or openai_api_key:
+                    from app.services.nine_router_client import craft_cinematic_thumbnail_prompt
+                    d_prompt = craft_cinematic_thumbnail_prompt(title=movie_title, plot_summary=plot_summary)
+                    gen_ai_path = generate_ai_image_with_dalle(prompt=d_prompt, api_key=openai_api_key)
+            except Exception:
+                gen_ai_path = None
+
+        if not gen_ai_path or not os.path.exists(gen_ai_path):
+            # 2. Try 9Router local/cloud
             try:
                 from app.services.nine_router_client import craft_cinematic_thumbnail_prompt, generate_ai_image_with_9router
                 p_prompt = craft_cinematic_thumbnail_prompt(title=movie_title, plot_summary=plot_summary)
@@ -422,11 +472,20 @@ class ThumbnailEngine:
                 gen_ai_path = None
 
         has_ai_poster = bool(gen_ai_path and os.path.exists(gen_ai_path))
-        badges = [
-            "🔥 AI CINEMA POSTER" if has_ai_poster else "😱 CLIMAX ZOOM",
-            "⚡ VS CONFRONTATION",
-            "🎬 CINEMA POSTER"
-        ]
+        has_yt_remix = bool(yt_thumb_path and os.path.exists(yt_thumb_path))
+
+        # Dynamic badges
+        if has_ai_poster:
+            badge_1 = "🔥 AI CINEMA POSTER"
+            badge_3 = "🔥 OFFICIAL POSTER REMIX" if has_yt_remix else "🎬 CINEMA POSTER"
+        elif has_yt_remix:
+            badge_1 = "🔥 OFFICIAL POSTER REMIX"
+            badge_3 = "🎬 CINEMA POSTER"
+        else:
+            badge_1 = "😱 CLIMAX ZOOM"
+            badge_3 = "🎬 CINEMA POSTER"
+
+        badges = [badge_1, "⚡ VS CONFRONTATION", badge_3]
 
         results = []
         for i in range(3):
@@ -436,9 +495,12 @@ class ThumbnailEngine:
 
             try:
                 if i == 0:
-                    # Variation 1: AI Cinema Poster if available, else Climax Face Zoom
+                    # Variation 1: AI Cinema Poster or YouTube Official Remix
                     if has_ai_poster:
                         with Image.open(gen_ai_path) as im:
+                            base_img = ThumbnailEngine.apply_cinema_poster_style(im)
+                    elif has_yt_remix:
+                        with Image.open(yt_thumb_path) as im:
                             base_img = ThumbnailEngine.apply_cinema_poster_style(im)
                     elif selected_frames:
                         with Image.open(selected_frames[0]) as im:
@@ -460,9 +522,12 @@ class ThumbnailEngine:
                         base_img = Image.new("RGB", (1280, 720), color=(40, 20, 20))
 
                 else:
-                    # Variation 3: Cinema Poster Art from climax/Act 3 frame
-                    frame_c = selected_frames[-1] if selected_frames else None
-                    if frame_c:
+                    # Variation 3: YouTube Official Remix (if Var 1 was AI Poster) or Climax/Act 3 Frame
+                    if has_ai_poster and has_yt_remix:
+                        with Image.open(yt_thumb_path) as im:
+                            base_img = ThumbnailEngine.apply_cinema_poster_style(im)
+                    elif selected_frames:
+                        frame_c = selected_frames[-1]
                         with Image.open(frame_c) as im_c:
                             base_img = ThumbnailEngine.apply_cinema_poster_style(im_c)
                     else:

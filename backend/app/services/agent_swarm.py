@@ -63,7 +63,15 @@ class AgentSwarmEngine:
         - Recommended Royalty-Free BGM Mood (suspense, tense, emotional, upbeat)
         - 12-20 Chronological Story Beats with timestamps
         """
-        excerpt = transcript_text[:4000] if transcript_text else ""
+        use_openai = False
+        try:
+            from app.services.openai_client import is_openai_available, call_chatgpt_llm
+            use_openai = is_openai_available()
+        except Exception:
+            pass
+
+        excerpt_len = 24000 if use_openai else 4000
+        excerpt = transcript_text[:excerpt_len] if transcript_text else ""
         system_prompt = (
             "You are the Detective & Context Agent of AutoExplainer AI. Analyze the dialogue transcript.\n"
             "Return ONLY a valid JSON object with keys:\n"
@@ -76,7 +84,14 @@ class AgentSwarmEngine:
         )
 
         user_prompt = f"Title Hint: {video_title_hint}\n\nTranscript Excerpt:\n{excerpt}"
-        raw_res = AgentSwarmEngine._call_9router(user_prompt, system_prompt=system_prompt, max_tokens=1200)
+        raw_res = None
+        if use_openai:
+            try:
+                raw_res = call_chatgpt_llm(user_prompt, system_prompt=system_prompt, model="gpt-4o", max_tokens=1500)
+            except Exception:
+                raw_res = None
+        if not raw_res:
+            raw_res = AgentSwarmEngine._call_9router(user_prompt, system_prompt=system_prompt, max_tokens=1200)
 
         if raw_res:
             clean_json = re.sub(r'^```(?:json)?|```$', '', raw_res.strip(), flags=re.MULTILINE).strip()
@@ -132,7 +147,9 @@ class AgentSwarmEngine:
         story_beats: List[Dict[str, Any]],
         notes: str = "",
         subs_text: str = "",
-        source_video_duration_sec: float = 0.0
+        source_video_duration_sec: float = 0.0,
+        openai_api_key: Optional[str] = None,
+        ai_provider: str = "auto"
     ) -> Dict[str, Any]:
         """
         Generates narrative storyboard script strictly anchored to story beats and transcript,
@@ -150,7 +167,9 @@ class AgentSwarmEngine:
             voice_speed=speech_velocity,
             plot_summary=notes,
             story_beats=story_beats,
-            source_video_duration_sec=source_video_duration_sec
+            source_video_duration_sec=source_video_duration_sec,
+            openai_api_key=openai_api_key,
+            ai_provider=ai_provider
         )
 
     # =========================================================================

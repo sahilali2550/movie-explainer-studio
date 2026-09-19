@@ -85,6 +85,36 @@ def update_ai_config(
         "message": conn.get("message", "Settings updated.")
     }
 
+@router.get("/openai-status")
+def get_openai_status():
+    """Checks OpenAI API key status and preferred model."""
+    from app.services.openai_client import load_openai_settings, is_openai_available
+    cfg = load_openai_settings()
+    has_key = is_openai_available()
+    key = cfg.get("api_key", "")
+    masked = f"{key[:7]}...{key[-4:]}" if len(key) > 11 else ("***" if key else "")
+    return {
+        "success": True,
+        "available": has_key,
+        "model": cfg.get("model", "gpt-4o"),
+        "key_masked": masked
+    }
+
+@router.post("/openai-config")
+def update_openai_config(
+    api_key: str = Form(...),
+    model: str = Form("gpt-4o")
+):
+    """Saves OpenAI API key and model preference."""
+    from app.services.openai_client import save_openai_settings, is_openai_available
+    saved = save_openai_settings(api_key=api_key, model=model)
+    return {
+        "success": saved,
+        "available": is_openai_available(),
+        "model": model,
+        "message": "OpenAI settings updated successfully."
+    }
+
 @router.post("/preview-clone")
 async def preview_clone_endpoint(
     clone_sample_file: UploadFile = File(...),
@@ -175,7 +205,8 @@ async def instant_thumbnails_endpoint(
             movie_title=movie_title,
             lang=language,
             plot_summary=plot_summary or "",
-            ai_image_path=ai_image_path
+            ai_image_path=ai_image_path,
+            youtube_url=url
         )
 
         log_event(f"✅ 3 High-CTR A/B test thumbnails successfully generated in {language.upper()}!", "SUCCESS")
@@ -216,6 +247,8 @@ async def generate_script_endpoint(
     num_parts: int = Form(3),
     voice_speed: str = Form("fast"),
     genre: str = Form("movie_recap"),
+    ai_provider: Optional[str] = Form("auto"),
+    openai_api_key: Optional[str] = Form(None),
     local_file: Optional[UploadFile] = File(None),
     custom_transcript: Optional[str] = Form(None)
 ):
@@ -280,7 +313,9 @@ async def generate_script_endpoint(
         plot_summary=plot_summary,
         voice_speed=voice_speed,
         genre=genre,
-        source_video_duration_sec=source_dur
+        source_video_duration_sec=source_dur,
+        openai_api_key=openai_api_key,
+        ai_provider=ai_provider or "auto"
     )
 
     raw_hook = result.get("hook_score", 0)
@@ -636,7 +671,8 @@ async def render_video_endpoint(
             lang=language,
             target_timestamps=final_target_timestamps,
             plot_summary=clean_narration[:400],
-            ai_image_path=ai_image_path
+            ai_image_path=ai_image_path,
+            youtube_url=url
         )
 
         # 8. Generate Social Media Metadata Suite
@@ -1488,7 +1524,8 @@ async def run_autopilot_endpoint(
                 custom_hooks=hook_opts,
                 target_timestamps=[float(climax_ts)] if climax_ts else None,
                 plot_summary=clean_narration[:400],
-                ai_image_path=ai_image_path
+                ai_image_path=ai_image_path,
+                youtube_url=url
             )
         except Exception as e:
             log_event(f"⚠️ [Autopilot] Thumbnail generation notice: {e}", "WARNING")

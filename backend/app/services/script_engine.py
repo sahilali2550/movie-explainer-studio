@@ -113,6 +113,36 @@ class ScriptEngine:
             }
 
     @staticmethod
+    def detect_episode_info(title: str, description: str = "") -> Dict[str, Any]:
+        """
+        Detects if content is an episodic series / drama (e.g. Episode 01, Ep 14, قسط 5).
+        Returns dict with is_episodic bool, current episode number, and next episode number.
+        """
+        combined = f"{title} {description}".lower()
+        patterns = [
+            r'(?:episode|ep|ep\.)\s*0*(\d+)',
+            r'(?:قسط|قسمت|حلقہ)\s*(?:نمبر)?\s*0*(\d+)',
+            r'\be0*(\d+)\b'
+        ]
+        for pat in patterns:
+            m = re.search(pat, combined, re.IGNORECASE)
+            if m:
+                try:
+                    num = int(m.group(1))
+                    return {
+                        "is_episodic": True,
+                        "episode_num": num,
+                        "next_episode_num": num + 1
+                    }
+                except Exception:
+                    pass
+        return {
+            "is_episodic": False,
+            "episode_num": None,
+            "next_episode_num": None
+        }
+
+    @staticmethod
     def strip_code_and_developer_artifacts(raw_text: str) -> str:
         """
         Strips markdown code blocks, python test functions (e.g. def test_word_count),
@@ -648,9 +678,9 @@ class ScriptEngine:
         }
 
         def tokenize(text: str) -> set:
-            """Lower-case alpha tokens, drop stop-words, keep words >= 3 chars."""
-            tokens = re.findall(r"[a-zA-Z]{3,}", text.lower())
-            return {t for t in tokens if t not in STOP_WORDS}
+            """Unicode alpha tokens for English, Urdu, Hindi, Arabic, etc., dropping stop-words and pure digits."""
+            tokens = re.findall(r"\w{2,}", text.lower(), flags=re.UNICODE)
+            return {t for t in tokens if t not in STOP_WORDS and not t.isdigit()}
 
         def score_match(block_tokens: set, cue_text: str) -> int:
             """Token overlap count between block narration and cue text."""
@@ -956,7 +986,7 @@ class ScriptEngine:
         clean_narr, _, _ = ScriptEngine.parse_storyboard(script_text)
         spoken_words = len(clean_narr.split()) if clean_narr else len(script_text.split())
         target_words = ScriptEngine.calculate_target_words(target_duration_mins, voice_speed, target_lang)
-        min_allowed = int(target_words * 0.75) if target_duration_mins >= 5 else int(target_words * 0.60)
+        min_allowed = int(target_words * 0.55) if target_duration_mins >= 5 else int(target_words * 0.50)
         if spoken_words < min_allowed:
             return False, f"Script is severely under-budget ({spoken_words} spoken words, minimum expected {min_allowed} for {target_duration_mins}m video)."
 
@@ -1095,6 +1125,21 @@ class ScriptEngine:
         milestone_lines.append(f"CRITICAL MILESTONE LOCK: The final scene MUST reach the Epilogue timeframe ({milestones[-1]['timestamp_range']}) to deliver the full climax and resolution!")
         milestone_section = "\n".join(milestone_lines) + "\n"
 
+        ep_info = ScriptEngine.detect_episode_info(title, description)
+        episodic_instructions = ""
+        if ep_info.get("is_episodic"):
+            c_num = ep_info["episode_num"]
+            n_num = ep_info["next_episode_num"]
+            episodic_instructions = f"""
+8. MANDATORY EPISODIC CLIFFHANGER & NEXT EPISODE CTA:
+   - This video covers Episode {c_num}!
+   - Establish character stakes and interpersonal conflicts clearly in Act 1.
+   - Act 3 MUST end with an intense cliffhanger on the major unanswered dramatic question of this episode!
+   - Your closing Call-To-Action (CTA) in {lang_name} MUST explicitly instruct viewers to watch Episode {n_num} on the channel:
+     "To find out what happens next, watch Episode {n_num} right now on our channel! Don't forget to like and subscribe!"
+     (In Urdu: "کہانی کا اگلا سنسنی خیز موڑ جاننے کے لیے Episode {n_num} ابھی ہمارے چینل پر دیکھیں! ویڈیو کو لائک کریں اور چینل کو سبسکرائب کریں!")
+"""
+
         prompt = f"""You are a {cfg['role']}.
 Title: {title}
 Genre: {cfg['label']}
@@ -1105,6 +1150,7 @@ Description / Background: {description[:800]}
 {milestone_section}
 OBJECTIVES:
 1. Write a captivating, immersive THIRD-PERSON {genre} narrative in natural, colloquial {lang_name}.
+   - STORY ARCHITECTURE & CHARACTER MOTIVATION: Do NOT merely produce a chronological list of isolated dialogue quotes. In Act 1, introduce the protagonist and main figures, explain the premise/logline and dramatic conflict (who are they, what is their feud or goal?), and weave spoken dialogues naturally into narrative sentences (e.g. 'As the party spiraled into chaos, Dawood coldly warned Arbaaz: ...').
 2. Tone & Master Storyteller Voice: {persona_guide} (Overall Mood: {mood.upper()}).
    - CONVERSATIONAL STORYTELLING: Deliver the story in an engaging, conversational tone — as if you are telling an intense, captivating story directly to a friend. Maintain suspense, dramatic momentum, and curiosity throughout.
 3. MANDATORY LENGTH REQUIREMENT: You MUST write at least {target_words} spoken words to match a full {duration_mins}-minute video (at {voice_speed} pace). DO NOT summarize briefly or skip scenes. Elaborate on dialogues, character emotions, and scene details.
@@ -1116,6 +1162,7 @@ OBJECTIVES:
    - In the final 15-20 seconds of Act 3, provide a punchy conclusion and short review / moral takeaway summarizing the core theme or fate of the characters before the call-to-action!
 6. DIALOGUE & CHARACTER QUOTING: You MUST naturally quote and reference key dialogues and character exchanges throughout the story (e.g. hero shouts: 'Get out of the way!' while firing; heroine reveals the truth: 'He was never on our side'; villain threatens...). Narrate critical turning-point actions (explosions, gunfire, car chases, confrontations) at their exact timestamps from the roadmap. This creates an authentic, emotionally charged story and guarantees perfect synchronization with the movie footage.
 7. STRICT ANTI-CODE RULE: Do NOT include code blocks, python scripts, unit tests, or markdown backticks under any circumstance. Output pure spoken storytelling narration.
+{episodic_instructions}
 {source_pacing_note}
 
 NARRATIVE STRUCTURE:
@@ -1155,7 +1202,9 @@ FORMATTING & AI DIRECTOR REQUIREMENTS:
         voice_speed: str = "fast",
         genre: str = "movie_recap",
         source_video_duration_sec: float = 0,
-        story_beats: Optional[List[Dict[str, Any]]] = None
+        story_beats: Optional[List[Dict[str, Any]]] = None,
+        openai_api_key: Optional[str] = None,
+        ai_provider: str = "auto"
     ) -> Dict[str, Any]:
         """
         Generates a viral cinematic storytelling recap or universal explainer in any of the 15+ supported languages.
@@ -1198,6 +1247,77 @@ FORMATTING & AI DIRECTOR REQUIREMENTS:
             prompt += f"""\nDivide the story into {num_parts} distinct parts (Part 1 to Part {num_parts}).
 Each part must begin with a powerful hook.
 Separate each part strictly with '===PART===' on its own line."""
+
+        # 0. Attempt generation via OpenAI ChatGPT (GPT-4o) if requested or available
+        try:
+            from app.services.openai_client import is_openai_available, call_chatgpt_llm, load_openai_settings
+            cfg_oa = load_openai_settings()
+            oa_key = (openai_api_key or cfg_oa.get("api_key", "")).strip()
+            use_openai = bool(oa_key and (ai_provider in ("openai", "auto") or is_openai_available()))
+            if use_openai:
+                lang_info = SUPPORTED_LANGUAGES.get(target_lang, SUPPORTED_LANGUAGES["en"])
+                system_instruction = f"You are an elite, world-class viral YouTube movie & drama narrator and storyboard director in natural colloquial {lang_info['name']}."
+                gpt_model = cfg_oa.get("model", "gpt-4o")
+                gpt_text = call_chatgpt_llm(
+                    prompt=prompt,
+                    system_prompt=system_instruction,
+                    model=gpt_model,
+                    max_tokens=4000,
+                    api_key=oa_key
+                )
+                if gpt_text and len(gpt_text.strip()) > 80:
+                    gpt_text = ScriptEngine.strip_code_and_developer_artifacts(gpt_text)
+                    clean_test_oa, _, _ = ScriptEngine.parse_storyboard(gpt_text)
+                    actual_words_oa = len(clean_test_oa.split())
+
+                    # Auto-Expansion if under budget
+                    if duration_mins >= 3 and actual_words_oa < int(target_words * 0.80):
+                        exp_prompt = f"""The following {lang_info['name']} script is only {actual_words_oa} words, but the video duration requires AT LEAST {target_words} words:
+
+--- CURRENT SCRIPT ---
+{gpt_text}
+--- END ---
+
+TASK: Elaborate, expand and enrich the story across Act 1, Act 2, and Act 3 with detailed character dialogues, dramatic internal monologues, intense scene descriptions, and escalating emotional stakes to reach {target_words} words. Return the complete, expanded narrative with milestone timestamp brackets like [01:15 - 02:30]."""
+                        try:
+                            expanded_oa = call_chatgpt_llm(prompt=exp_prompt, system_prompt=system_instruction, model=gpt_model, max_tokens=4000, api_key=oa_key)
+                            if expanded_oa and len(expanded_oa.split()) > actual_words_oa:
+                                gpt_text = ScriptEngine.strip_code_and_developer_artifacts(expanded_oa.strip())
+                        except Exception:
+                            pass
+
+                    gpt_text = ScriptEngine.clamp_script_word_budget(
+                        gpt_text.strip(),
+                        target_duration_mins=duration_mins,
+                        target_lang=target_lang,
+                        voice_speed=voice_speed
+                    )
+                    is_valid, val_report = ScriptEngine.validate_script_integrity(
+                        script_text=gpt_text,
+                        source_duration_sec=source_video_duration_sec,
+                        target_duration_mins=duration_mins,
+                        target_lang=target_lang,
+                        voice_speed=voice_speed
+                    )
+                    clean_narr_oa, _, _ = ScriptEngine.parse_storyboard(gpt_text)
+                    spoken_word_count_oa = len(clean_narr_oa.split()) if clean_narr_oa else len(gpt_text.split())
+                    hook_metrics = ScriptEngine.calculate_hook_score(gpt_text, target_lang)
+                    return {
+                        "success": True,
+                        "model": f"openai:{gpt_model}",
+                        "script": gpt_text.strip(),
+                        "language": target_lang,
+                        "genre": genre,
+                        "target_words": target_words,
+                        "actual_words": spoken_word_count_oa,
+                        "raw_words": len(gpt_text.split()),
+                        "hook_score": hook_metrics,
+                        "story_beats": story_beats or [],
+                        "is_valid": is_valid,
+                        "integrity_report": val_report
+                    }
+        except Exception as e:
+            print(f"[OpenAI ChatGPT Integration Notice] Fallback triggered: {e}")
 
         # 1. Attempt generation via 9Router (Primary Local / Cloud LLM)
         try:
