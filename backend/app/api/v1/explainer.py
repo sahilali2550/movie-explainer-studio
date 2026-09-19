@@ -370,13 +370,14 @@ async def render_video_endpoint(
     genre: str = Form("movie_recap"),
     audio_mode: str = Form("hybrid"),
     resolution: str = Form("720p"),
+    transcript_text: Optional[str] = Form(None),
     local_file: Optional[UploadFile] = File(None),
     custom_audio_file: Optional[UploadFile] = File(None),
     clone_sample_file: Optional[UploadFile] = File(None)
 ):
     """
     Full-Auto End-to-End Explainer Video Pipeline:
-    1. Parse narration & scene timestamps from script.
+    1. Parse narration & scene timestamps from script (Dialogue-Anchored).
     2. Handle Voiceover Audio (AI Neural / Custom PC Upload / Cloned Voice).
     3. Slice video scenes matching audio duration.
     4. Mix ducked mood background score.
@@ -411,11 +412,30 @@ async def render_video_endpoint(
     log_event(f"🚀 Render pipeline triggered for '{movie_title}' [Genre: {genre}, Audio: {audio_mode.upper()}] in {language.upper()} ({aspect_ratio})", "INFO")
 
     try:
-        # 1. Parse Storyboard Script first so scene_ranges are known for selective downloading
+        # 1. Parse Storyboard Script and Anchor Scenes to Dialogue
+        dialogue_timeline = []
+        raw_transcript = (transcript_text or "").strip()
+        if raw_transcript:
+            parsed_trans = VideoEngine.parse_raw_transcript_text(raw_transcript)
+            dialogue_timeline = parsed_trans.get("dialogue_timeline", [])
+        elif url and VideoEngine.is_valid_youtube_url(url):
+            try:
+                info = VideoEngine.extract_youtube_info(url, str(TEMP_DIR), job_id)
+                subs_raw = info.get("subtitles_text", "")
+                if subs_raw:
+                    parsed_trans = VideoEngine.parse_raw_transcript_text(subs_raw)
+                    dialogue_timeline = parsed_trans.get("dialogue_timeline", [])
+            except Exception:
+                pass
+
         clean_narration, scene_ranges, scene_subs = ScriptEngine.parse_storyboard(script_text)
-        scene_blocks = ScriptEngine.parse_storyboard_blocks(script_text)
+        scene_blocks = ScriptEngine.parse_storyboard_blocks(script_text, dialogue_timeline=dialogue_timeline)
+        if scene_blocks:
+            scene_ranges = [(b.movie_start, b.movie_end) for b in scene_blocks]
         if not clean_narration:
             clean_narration = script_text.strip()
+        if dialogue_timeline:
+            log_event(f"🎯 Dialogue-Anchored Synchronization: Matched {len(scene_blocks)} scene blocks to actual dialogue moments in movie", "INFO")
         log_event(f"📝 Parsed narrative script: {len(clean_narration.split())} words, {len(scene_ranges)} scene cuts, {len(scene_blocks)} scene blocks", "INFO")
 
         # 2. Handle Voiceover Audio First (Mode A: AI Voice, Mode B: Custom Audio, Mode C: Cloned Voice)
@@ -481,20 +501,31 @@ async def render_video_endpoint(
 
         raw_dur = VideoEngine.get_duration(raw_video_path) if (raw_video_path and os.path.exists(raw_video_path)) else 0.0
 
-        # 4. Slice & Assemble Video Highlights (Proportionally time-locked to narration)
+        # 4. Slice & Assemble Video — Audio-Locked (each clip duration == narration window)
         video_slice_path = str(TEMP_DIR / f"{job_id}_slice.mp4")
-        expected_cuts = max(8, int(round(speech_dur / 3.8)))
-        log_event(f"🎬 Slicing ~{expected_cuts} dynamic 3-5s narrative cuts across movie timeline (Beginning to Climax)...", "INFO")
+        log_event(f"🎬 Building {len(scene_blocks)} audio-locked scene clips (narration-to-visual deterministic sync)...", "INFO")
         assembled_video = await asyncio.to_thread(
-            VideoEngine.slice_and_assemble_scenes,
+            VideoEngine.build_audio_locked_scene_clips,
             input_video=raw_video_path,
-            scene_ranges=scene_ranges,
-            target_duration=speech_dur,
-            output_video=video_slice_path,
+            scene_blocks=scene_blocks,
             temp_dir=str(TEMP_DIR),
             job_id=job_id,
-            scene_blocks=scene_blocks
+            output_video=video_slice_path,
         )
+        # Fallback: legacy slice if audio-locked produced no output
+        if not assembled_video or not os.path.exists(assembled_video):
+            expected_cuts = max(8, int(round(speech_dur / 3.8)))
+            log_event(f"⚠️ Audio-locked sync fallback: slicing ~{expected_cuts} narrative cuts...", "WARNING")
+            assembled_video = await asyncio.to_thread(
+                VideoEngine.slice_and_assemble_scenes,
+                input_video=raw_video_path,
+                scene_ranges=scene_ranges,
+                target_duration=speech_dur,
+                output_video=video_slice_path,
+                temp_dir=str(TEMP_DIR),
+                job_id=job_id,
+                scene_blocks=scene_blocks
+            )
 
         # 5. Compose Soundscape (Hybrid, SFX Only, or Music Only)
         log_event(f"🎵 Composing soundtrack [{audio_mode.upper()} • {genre} • Mood: {mood_theme}]...", "INFO")
@@ -753,17 +784,25 @@ async def render_batch_endpoint(
             if base_scene_blocks:
                 base_scene_blocks = ScriptEngine.assign_narration_timing(base_scene_blocks, base_duration, base_speech_cues)
 
-            # 1. Slice master video to exact baseline duration
+            # 1. Slice master video — Audio-Locked (deterministic A/V sync)
             master_slice_path = str(TEMP_DIR / f"{job_id}_master_slice.mp4")
-            assembled_master = VideoEngine.slice_and_assemble_scenes(
+            assembled_master = VideoEngine.build_audio_locked_scene_clips(
                 input_video=raw_video_path,
-                scene_ranges=base_scene_ranges,
-                target_duration=base_duration,
-                output_video=master_slice_path,
+                scene_blocks=base_scene_blocks,
                 temp_dir=str(TEMP_DIR),
                 job_id=f"{job_id}_master",
-                scene_blocks=base_scene_blocks
+                output_video=master_slice_path,
             )
+            if not assembled_master or not os.path.exists(assembled_master):
+                assembled_master = VideoEngine.slice_and_assemble_scenes(
+                    input_video=raw_video_path,
+                    scene_ranges=base_scene_ranges,
+                    target_duration=base_duration,
+                    output_video=master_slice_path,
+                    temp_dir=str(TEMP_DIR),
+                    job_id=f"{job_id}_master",
+                    scene_blocks=base_scene_blocks
+                )
 
             # 2. Render 1 Clean Master Video (1080p, no burnt-in subtitles so multi-audio viewers see clean visuals)
             master_video_filename = f"AutoExplainer_{job_id}_MASTER.mp4"
@@ -939,15 +978,23 @@ async def render_batch_endpoint(
                         loc_scene_blocks = ScriptEngine.assign_narration_timing(loc_scene_blocks, speech_dur, speech_cues)
 
                     video_slice_path = str(TEMP_DIR / f"{job_id}_{lang}_slice.mp4")
-                    assembled_video = VideoEngine.slice_and_assemble_scenes(
+                    assembled_video = VideoEngine.build_audio_locked_scene_clips(
                         input_video=raw_video_path,
-                        scene_ranges=scene_ranges,
-                        target_duration=speech_dur,
-                        output_video=video_slice_path,
+                        scene_blocks=loc_scene_blocks,
                         temp_dir=str(TEMP_DIR),
                         job_id=f"{job_id}_{lang}",
-                        scene_blocks=loc_scene_blocks
+                        output_video=video_slice_path,
                     )
+                    if not assembled_video or not os.path.exists(assembled_video):
+                        assembled_video = VideoEngine.slice_and_assemble_scenes(
+                            input_video=raw_video_path,
+                            scene_ranges=scene_ranges,
+                            target_duration=speech_dur,
+                            output_video=video_slice_path,
+                            temp_dir=str(TEMP_DIR),
+                            job_id=f"{job_id}_{lang}",
+                            scene_blocks=loc_scene_blocks
+                        )
 
                     bgm_track = AudioMixer.get_mood_music_track(mood_theme)
                     if not bgm_track and audio_mode != "sfx_only":
@@ -1252,9 +1299,26 @@ async def run_autopilot_endpoint(
         genre = context.get("genre", "movie_recap")
         mood = context.get("mood", "suspense")
 
-        # Step 2: Parse script for scene timestamps and clean narration
+        # Step 2: Parse script for scene timestamps and clean narration (Dialogue-Anchored)
+        dialogue_timeline = []
+        raw_transcript = (transcript_text or "").strip()
+        if raw_transcript:
+            parsed_trans = VideoEngine.parse_raw_transcript_text(raw_transcript)
+            dialogue_timeline = parsed_trans.get("dialogue_timeline", [])
+        elif url and VideoEngine.is_valid_youtube_url(url):
+            try:
+                info = VideoEngine.extract_youtube_info(url, str(TEMP_DIR), job_id)
+                subs_raw = info.get("subtitles_text", "")
+                if subs_raw:
+                    parsed_trans = VideoEngine.parse_raw_transcript_text(subs_raw)
+                    dialogue_timeline = parsed_trans.get("dialogue_timeline", [])
+            except Exception:
+                pass
+
         clean_narration, scene_ranges, scene_subs = ScriptEngine.parse_storyboard(final_script)
-        scene_blocks = ScriptEngine.parse_storyboard_blocks(final_script)
+        scene_blocks = ScriptEngine.parse_storyboard_blocks(final_script, dialogue_timeline=dialogue_timeline)
+        if scene_blocks:
+            scene_ranges = [(b.movie_start, b.movie_end) for b in scene_blocks]
         if not clean_narration:
             clean_narration = f"Here is the story recap of {movie_title}."
 
@@ -1301,20 +1365,30 @@ async def run_autopilot_endpoint(
 
         raw_dur = VideoEngine.get_duration(raw_video_path) if (raw_video_path and os.path.exists(raw_video_path)) else 0.0
 
-        # Step 5: Video Slicing & Assembly (Proportionally time-locked to narration)
+        # Step 5: Video Slicing & Assembly — Audio-Locked (deterministic narration-to-visual sync)
         video_slice_path = str(TEMP_DIR / f"{job_id}_sliced.mp4")
-        expected_cuts = max(8, int(round(speech_dur / 3.8)))
-        log_event(f"🎬 [Autopilot] Slicing ~{expected_cuts} dynamic 3-5s scene cuts across movie timeline...", "INFO")
+        log_event(f"🎬 [Autopilot] Building {len(scene_blocks)} audio-locked scene clips (narration-to-visual deterministic sync)...", "INFO")
         assembled_video = await asyncio.to_thread(
-            VideoEngine.slice_and_assemble_scenes,
+            VideoEngine.build_audio_locked_scene_clips,
             input_video=raw_video_path,
-            scene_ranges=scene_ranges,
-            target_duration=speech_dur,
-            output_video=video_slice_path,
+            scene_blocks=scene_blocks,
             temp_dir=str(TEMP_DIR),
             job_id=job_id,
-            scene_blocks=scene_blocks
+            output_video=video_slice_path,
         )
+        if not assembled_video or not os.path.exists(assembled_video):
+            expected_cuts = max(8, int(round(speech_dur / 3.8)))
+            log_event(f"⚠️ [Autopilot] Audio-locked sync fallback: slicing ~{expected_cuts} narrative cuts...", "WARNING")
+            assembled_video = await asyncio.to_thread(
+                VideoEngine.slice_and_assemble_scenes,
+                input_video=raw_video_path,
+                scene_ranges=scene_ranges,
+                target_duration=speech_dur,
+                output_video=video_slice_path,
+                temp_dir=str(TEMP_DIR),
+                job_id=job_id,
+                scene_blocks=scene_blocks
+            )
 
         # Step 6: Sound Design (BGM + Dynamic SFX)
         log_event("🔊 [Autopilot] Audio Mixer integrating dynamic SFX hits & ducked music...", "INFO")

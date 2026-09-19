@@ -239,9 +239,9 @@ function onAudioModeChange() {
 }
 
 const LANGUAGE_WPM = {
-  ur: 185, hi: 180, es: 170, pt: 165, id: 165, vi: 175,
-  en: 150, fr: 155, it: 160, tr: 155, de: 140, ar: 140,
-  ru: 135, th: 160, ja: 280, ko: 200
+  ur: 132, hi: 138, es: 165, pt: 160, id: 155, vi: 160,
+  en: 150, fr: 150, it: 155, tr: 150, de: 135, ar: 130,
+  ru: 130, th: 155, ja: 280, ko: 200
 };
 
 function updateEstimatedWordCount() {
@@ -913,8 +913,16 @@ function onLanguageChange() {
 }
 
 function updateScriptStats() {
-  const text = $('script-area').value.trim();
-  const words = text ? text.split(/\s+/).filter(Boolean).length : 0;
+  const rawText = $('script-area').value.trim();
+  const cleanSpoken = rawText
+    .replace(/\[SCENE:[^\]]*\]/gi, '')
+    .replace(/\[VOICEOVER\]/gi, '')
+    .replace(/\[SFX:[^\]]*\]/gi, '')
+    .replace(/\[[^\]]*\]/g, '')
+    .replace(/^#+.*$/gm, '')
+    .trim();
+  const spokenWords = cleanSpoken ? cleanSpoken.split(/\s+/).filter(Boolean).length : 0;
+  const rawWords = rawText ? rawText.split(/\s+/).filter(Boolean).length : 0;
   const lang = currentLangMode === 'multi' ? (activeScriptTabLang || 'en') : ($('select-lang') ? $('select-lang').value : 'en');
   const speedVal = $('select-speed') ? $('select-speed').value : 'fast';
 
@@ -922,11 +930,11 @@ function updateScriptStats() {
   const speedMult = speedVal === 'ultra_fast' ? 1.25 : (speedVal === 'fast' ? 1.15 : 1.0);
   const effectiveWpm = baseWpm * speedMult;
 
-  const estSec = Math.round((words / effectiveWpm) * 60);
+  const estSec = Math.round((spokenWords / effectiveWpm) * 60);
   const min = Math.floor(estSec / 60);
   const sec = estSec % 60;
   const timeStr = min > 0 ? `${min}m ${sec}s` : `${sec}s`;
-  $('script-stats').textContent = `${words} Words • ~${timeStr} Voiceover (${lang.toUpperCase()})`;
+  $('script-stats').textContent = `${spokenWords} Spoken Words (${rawWords} Total) • ~${timeStr} Voiceover (${lang.toUpperCase()})`;
 }
 
 function clearScript() {
@@ -1224,6 +1232,8 @@ async function renderExplainerVideo() {
     fd.append('script_text', scriptText);
     const titleVal = ($('input-title') ? $('input-title').value.trim() : '') || 'Movie Story Recap';
     fd.append('title', titleVal);
+    const customTranscript = $('input-transcript') ? $('input-transcript').value.trim() : '';
+    if (customTranscript) fd.append('transcript_text', customTranscript);
     if (isUrlMode) fd.append('url', url);
     else if (localFile) fd.append('local_file', localFile);
 

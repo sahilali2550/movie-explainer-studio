@@ -851,6 +851,250 @@ class VideoEngine:
         return input_video
 
     @staticmethod
+    def build_audio_locked_scene_clips(
+        input_video: str,
+        scene_blocks: List[Any],
+        temp_dir: str,
+        job_id: str,
+        output_video: str
+    ) -> str:
+        """
+        Audio-Locked Scene Clip Engine (Principal Engineer Fix — Scene-Voiceover Desync).
+
+        Produces one video clip per SceneBlock where clip.duration == block.narration_dur exactly.
+        This eliminates the core desynchronization bug where video played in a continuous loop
+        while audio narrated specific scenes from specific timestamps.
+
+        Per-block strategy:
+          1. Cut source movie at [movie_start .. movie_end] with PTS reset.
+          2. Compute speed_ratio = movie_window / narration_dur:
+             - ratio in [0.5, 2.0]: apply setpts={ratio}*PTS to match clip duration to narration.
+             - ratio > 2.0 (movie much longer): trim clip to narration_dur exactly.
+             - ratio < 0.5 (movie clip too short):
+               * Option-C (primary): extend movie_end forward by narration_dur from movie_start,
+                 capped at total movie duration — natural, seamless continuation.
+               * Option-B (fallback at video end): if extending would exceed movie duration,
+                 freeze the last frame using tpad + slow zoompan push-in.
+          3. Concatenate all adjusted clips into output_video.
+          4. Falls back to sample_timeline() on any exception.
+
+        Args:
+            input_video:  Path to the source movie file.
+            scene_blocks: List[SceneBlock] — must have narration_start/end set by
+                          assign_narration_timing() before this is called.
+            temp_dir:     Temporary directory for intermediate clip files.
+            job_id:       Unique job identifier for clip file naming.
+            output_video: Final assembled output path.
+
+        Returns:
+            Path to assembled video (output_video on success, fallback path otherwise).
+        """
+        import math as _math
+        ffmpeg_bin = get_ffmpeg_binary()
+
+        # Guard: empty/missing blocks or input video
+        if not scene_blocks or not input_video or not os.path.exists(input_video):
+            print("[AudioLockedSync] No scene blocks or input video — falling back to sample_timeline")
+            total_dur = sum(
+                max(0.1, b.narration_end - b.narration_start) for b in (scene_blocks or [])
+            ) or 60.0
+            if input_video and os.path.exists(input_video):
+                return VideoEngine.sample_timeline(
+                    input_video, total_dur, VideoEngine.get_duration(input_video),
+                    output_video, temp_dir, job_id
+                )
+            return output_video
+
+        total_movie_dur = VideoEngine.get_duration(input_video)
+        clip_paths: List[str] = []
+        concat_file = os.path.join(temp_dir, f"{job_id}_alc_concat.txt")
+
+        try:
+            for idx, block in enumerate(scene_blocks):
+                narration_dur = round(block.narration_end - block.narration_start, 3)
+                if narration_dur <= 0.0:
+                    narration_dur = max(0.1, getattr(block, "speech_dur", 0.0))
+                if narration_dur <= 0.0:
+                    narration_dur = 3.5  # absolute minimum
+
+                movie_start = max(0.0, float(block.movie_start))
+                movie_end = min(float(block.movie_end), total_movie_dur)
+                movie_window = max(0.0, movie_end - movie_start)
+
+                clip_out = os.path.join(temp_dir, f"{job_id}_alc_{idx}.mp4")
+
+                # ── Strategy selection ─────────────────────────────────────────
+                speed_ratio = movie_window / narration_dur if narration_dur > 0 else 1.0
+
+                if speed_ratio >= 0.5:
+                    # ── Case A: ratio in [0.5, ∞) — cut + setpts or trim ──────
+                    cut_end = movie_end
+                    if speed_ratio > 2.0:
+                        # Movie clip much longer than narration: trim to narration_dur
+                        cut_end = min(movie_start + narration_dur, total_movie_dur)
+                        speed_ratio = 1.0
+
+                    cmd_cut = [
+                        ffmpeg_bin, "-y",
+                        "-ss", str(round(movie_start, 3)),
+                        "-to", str(round(cut_end, 3)),
+                        "-i", input_video,
+                        "-vf", f"setpts={round(speed_ratio, 4)}*PTS-STARTPTS",
+                        "-c:v", "libx264", "-preset", "ultrafast", "-crf", "23",
+                        "-an",
+                        clip_out
+                    ]
+                    res = subprocess.run(cmd_cut, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                    if res.returncode == 0 and os.path.exists(clip_out) and os.path.getsize(clip_out) > 0:
+                        clip_paths.append(clip_out)
+                        continue
+
+                # ── Case B / C: ratio < 0.5 — movie clip too short ────────────
+                # Option-C: extend movie_end forward to fill narration_dur
+                extended_end = movie_start + narration_dur
+
+                if extended_end <= total_movie_dur:
+                    # Option-C: extend the cut — natural continuation, no loop
+                    cmd_extend = [
+                        ffmpeg_bin, "-y",
+                        "-ss", str(round(movie_start, 3)),
+                        "-to", str(round(extended_end, 3)),
+                        "-i", input_video,
+                        "-vf", "setpts=PTS-STARTPTS",
+                        "-c:v", "libx264", "-preset", "ultrafast", "-crf", "23",
+                        "-an",
+                        clip_out
+                    ]
+                    res = subprocess.run(cmd_extend, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                    if res.returncode == 0 and os.path.exists(clip_out) and os.path.getsize(clip_out) > 0:
+                        clip_paths.append(clip_out)
+                        continue
+
+                # At (or near) end of video — use Option-B: freeze + zoom push
+                # Step 1: cut from movie_start to end of movie
+                clip_cut = os.path.join(temp_dir, f"{job_id}_alc_{idx}_cut.mp4")
+                actual_end = min(total_movie_dur, extended_end)
+                gap_remaining = max(0.0, narration_dur - (actual_end - movie_start))
+
+                cmd_cut_b = [
+                    ffmpeg_bin, "-y",
+                    "-ss", str(round(movie_start, 3)),
+                    "-to", str(round(actual_end, 3)),
+                    "-i", input_video,
+                    "-vf", "setpts=PTS-STARTPTS",
+                    "-c:v", "libx264", "-preset", "ultrafast", "-crf", "23",
+                    "-an",
+                    clip_cut
+                ]
+                subprocess.run(cmd_cut_b, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+
+                if os.path.exists(clip_cut) and os.path.getsize(clip_cut) > 0 and gap_remaining > 0.05:
+                    # Step 2: Option-B — tpad freeze + zoompan subtle push-in
+                    freeze_fps = 24
+                    freeze_frames = int(_math.ceil(gap_remaining * freeze_fps))
+                    zoom_step = round(0.05 / max(1, freeze_frames), 6)
+
+                    cmd_freeze = [
+                        ffmpeg_bin, "-y",
+                        "-i", clip_cut,
+                        "-vf",
+                        f"tpad=stop_mode=clone:stop_duration={round(gap_remaining, 3)},"
+                        f"zoompan=z='min(zoom+{zoom_step},1.05)':d={freeze_frames}"
+                        f":x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':s=iw:sh=ih:fps={freeze_fps}",
+                        "-c:v", "libx264", "-preset", "ultrafast", "-crf", "23",
+                        "-an",
+                        clip_out
+                    ]
+                    res_f = subprocess.run(cmd_freeze, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+
+                    if res_f.returncode == 0 and os.path.exists(clip_out) and os.path.getsize(clip_out) > 0:
+                        pass  # success — fall through to cleanup
+                    else:
+                        # zoompan failed (complex filter) — simpler tpad only
+                        cmd_tpad = [
+                            ffmpeg_bin, "-y",
+                            "-i", clip_cut,
+                            "-vf", f"tpad=stop_mode=clone:stop_duration={round(gap_remaining, 3)}",
+                            "-c:v", "libx264", "-preset", "ultrafast", "-crf", "23",
+                            "-an",
+                            clip_out
+                        ]
+                        subprocess.run(cmd_tpad, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+
+                    # Clean up intermediate cut
+                    if os.path.exists(clip_cut):
+                        try:
+                            os.remove(clip_cut)
+                        except Exception:
+                            pass
+
+                elif os.path.exists(clip_cut) and os.path.getsize(clip_cut) > 0:
+                    # No gap needed — just use the cut directly
+                    os.replace(clip_cut, clip_out)
+
+                if os.path.exists(clip_out) and os.path.getsize(clip_out) > 0:
+                    clip_paths.append(clip_out)
+                    continue
+
+                # Final per-block fallback: simple -t trim from movie_start
+                cmd_fb = [
+                    ffmpeg_bin, "-y",
+                    "-ss", str(round(movie_start, 3)),
+                    "-t", str(round(narration_dur, 3)),
+                    "-i", input_video,
+                    "-vf", "setpts=PTS-STARTPTS",
+                    "-c:v", "libx264", "-preset", "ultrafast", "-crf", "23",
+                    "-an",
+                    clip_out
+                ]
+                res_fb = subprocess.run(cmd_fb, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                if res_fb.returncode == 0 and os.path.exists(clip_out) and os.path.getsize(clip_out) > 0:
+                    clip_paths.append(clip_out)
+
+            # ── Concatenate all clips ──────────────────────────────────────────
+            if clip_paths:
+                with open(concat_file, "w", encoding="utf-8") as f:
+                    for cp in clip_paths:
+                        safe_p = cp.replace("\\", "/")
+                        f.write(f"file '{safe_p}'\n")
+
+                cmd_concat = [
+                    ffmpeg_bin, "-y",
+                    "-f", "concat", "-safe", "0",
+                    "-i", concat_file,
+                    "-c", "copy",
+                    output_video
+                ]
+                res_c = subprocess.run(cmd_concat, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                if res_c.returncode == 0 and os.path.exists(output_video) and os.path.getsize(output_video) > 0:
+                    print(f"[AudioLockedSync] ✅ Assembled {len(clip_paths)} audio-locked clips → {output_video}")
+                    return output_video
+
+        except Exception as e:
+            print(f"[AudioLockedSync] Exception during assembly: {e}")
+        finally:
+            for cp in clip_paths:
+                if os.path.exists(cp):
+                    try:
+                        os.remove(cp)
+                    except Exception:
+                        pass
+            if os.path.exists(concat_file):
+                try:
+                    os.remove(concat_file)
+                except Exception:
+                    pass
+
+        # ── Global fallback ────────────────────────────────────────────────────
+        print("[AudioLockedSync] Falling back to sample_timeline()")
+        total_narration_dur = sum(
+            max(0.1, b.narration_end - b.narration_start) for b in scene_blocks
+        )
+        return VideoEngine.sample_timeline(
+            input_video, total_narration_dur, total_movie_dur, output_video, temp_dir, job_id
+        )
+
+    @staticmethod
     def generate_ass_subtitle_file(
         scene_subtitles: List[str],
         total_duration: float,
@@ -1033,13 +1277,13 @@ class VideoEngine:
 
         cmd = [
             ffmpeg_bin, "-y",
-            "-stream_loop", "-1", "-i", video_source,
+            "-i", video_source,
             "-i", audio_source,
             "-filter_complex", final_filter,
             "-map", "[vfinal]",
             "-map", "[afinal]",
             "-c:v", "libx264", "-preset", "fast", "-crf", "22", "-pix_fmt", "yuv420p",
-            "-c:a", "aac", "-b:a", "192k",
+            "-c:a", "aac", "-b:a", "192k", "-ac", "2",
             "-t", str(render_dur),
             output_path
         ]

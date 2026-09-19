@@ -39,22 +39,55 @@ class ScriptEngine:
         combined = f"{title} {description} {transcript_sample}".lower()
 
         horror_kw = ["ghost", "demon", "haunted", "witch", "curse", "creepy", "monsters", "chucky", "jigsaw", "killer", "conjuring", "mansion", "attic", "blood", "خوفناک", "بھوت", "चुड़ैल", "भूत"]
-        action_kw = ["mafia", "gangster", "heist", "police", "gun", "assassin", "agent", "chase", "combat", "fight", "revenge", "explosion", "cartel", "hitman", "rounds", "گینگسٹر", "مافیا", "गैंगस्टर", "गोलियां"]
+        action_kw = ["mafia", "gangster", "heist", "police", "gun", "assassin", "agent", "spy", "thriller", "chase", "combat", "fight", "revenge", "explosion", "cartel", "hitman", "rounds", "گینگسٹر", "مافیا", "गैंगस्टर", "गोलियां"]
         romance_kw = ["love", "romance", "heartbreak", "crying", "dying", "illness", "tears", "husband", "wife", "marriage", "divorce", "lover", "tragic", "hospital", "corridor", "letter", "محبت", "عشق", "آنسو", "प्यार", "दर्द", "आंसू"]
         scifi_kw = ["space", "alien", "robot", "galaxy", "future", "simulation", "matrix", "planet", "time travel", "cyborg"]
+        doc_kw = ["documentary", "historical documentary", "history", "ancient", "empire", "wwii", "world war", "civilization", "archaeological"]
+        bio_kw = ["biography", "biopic", "life story", "autobiography"]
+        crime_kw = ["true crime", "forensic", "serial killer", "unsolved mystery", "cold case"]
+        tech_kw = ["case study", "silicon valley", "startup", "tech giant", "billion dollar"]
 
-        if any(kw in combined for kw in horror_kw):
+        # Action/Spy/Thriller in title or description takes priority for movies
+        if any(kw in combined for kw in action_kw):
+            return {
+                "genre": "movie_recap",
+                "persona": "hollywood_trailer",
+                "mood": "tense",
+                "spoiler_mode": "full_recap"
+            }
+        elif any(kw in combined for kw in horror_kw):
             return {
                 "genre": "movie_recap",
                 "persona": "documentary",
                 "mood": "suspense",
                 "spoiler_mode": "full_recap"
             }
-        elif any(kw in combined for kw in action_kw):
+        elif any(kw in combined for kw in doc_kw):
             return {
-                "genre": "movie_recap",
-                "persona": "hollywood_trailer",
+                "genre": "documentary",
+                "persona": "documentary",
+                "mood": "suspense",
+                "spoiler_mode": "full_recap"
+            }
+        elif any(kw in combined for kw in bio_kw):
+            return {
+                "genre": "biography",
+                "persona": "documentary",
+                "mood": "emotional",
+                "spoiler_mode": "full_recap"
+            }
+        elif any(kw in combined for kw in crime_kw):
+            return {
+                "genre": "true_crime",
+                "persona": "documentary",
                 "mood": "tense",
+                "spoiler_mode": "full_recap"
+            }
+        elif any(kw in combined for kw in tech_kw):
+            return {
+                "genre": "tech_science",
+                "persona": "viral_fast",
+                "mood": "upbeat",
                 "spoiler_mode": "full_recap"
             }
         elif any(kw in combined for kw in romance_kw):
@@ -462,10 +495,18 @@ class ScriptEngine:
         return "\n".join(lines)
 
     @staticmethod
-    def parse_storyboard_blocks(raw_script: str) -> List[SceneBlock]:
+    def parse_storyboard_blocks(
+        raw_script: str,
+        dialogue_timeline: Optional[List[Dict[str, Any]]] = None
+    ) -> List[SceneBlock]:
         """
         Parses structured SceneBlock objects pairing each scene timestamp cut [SCENE: MM:SS - MM:SS]
         with its clean narration text and word count.
+
+        T-03 Extension: If dialogue_timeline is supplied (list of {start, end, text} cues from
+        the source movie transcript), anchor_scenes_to_dialogue() is called automatically after
+        parsing to replace AI-invented timestamps with real movie timestamps.
+        Omit dialogue_timeline for backward-compatible behavior.
         """
         if not raw_script:
             return []
@@ -551,6 +592,120 @@ class ScriptEngine:
                         narration_text=scene_text,
                         word_count=max(1, wc)
                     ))
+
+        # T-03: Auto-anchor to real dialogue timestamps when timeline is provided
+        if dialogue_timeline:
+            blocks = ScriptEngine.anchor_scenes_to_dialogue(blocks, dialogue_timeline)
+
+        return blocks
+
+    @staticmethod
+    def anchor_scenes_to_dialogue(
+        blocks: List["SceneBlock"],
+        dialogue_timeline: List[Dict[str, Any]],
+        min_scene_dur: float = 5.0,
+        max_scene_dur: float = 90.0
+    ) -> List["SceneBlock"]:
+        """
+        Dialogue-Anchor Algorithm (T-01).
+
+        Replaces AI-invented [SCENE: MM:SS] timestamps in each SceneBlock with
+        REAL timestamps from the source movie's dialogue_timeline, ensuring that
+        the video clip cut corresponds to the actual movie moment being narrated.
+
+        Strategy (keyword overlap — no external deps):
+          1. Tokenise each block's narration_text into a set of meaningful words.
+          2. For every dialogue_timeline cue, count the number of shared tokens with
+             the block's narration.
+          3. The cue with the highest overlap score becomes the anchor.
+          4. Chronological integrity: each block's anchor must be >= previous block's
+             anchor (stable sort).
+          5. Graceful fallback: if no useful match is found (score == 0), the block
+             keeps its original AI timestamp — never silently dropped.
+
+        Args:
+            blocks:            SceneBlocks parsed from the AI-generated script.
+            dialogue_timeline: [{start, end, text}, ...] from parse_raw_transcript_text().
+            min_scene_dur:     Minimum scene window in seconds (default 5.0s).
+            max_scene_dur:     Maximum scene window in seconds (default 90.0s).
+
+        Returns:
+            Same list of SceneBlocks with movie_start / movie_end updated to real
+            timestamps where a confident match was found.
+        """
+        if not blocks:
+            return []
+        if not dialogue_timeline:
+            return blocks  # graceful fallback: keep AI timestamps
+
+        # --- Stop-word filter (language-agnostic common words to ignore) ---
+        STOP_WORDS = {
+            "a", "an", "the", "is", "in", "it", "of", "to", "and", "or",
+            "on", "at", "by", "as", "be", "we", "he", "she", "his", "her",
+            "was", "are", "this", "that", "with", "for", "from", "not",
+            "but", "so", "if", "its", "into", "up", "out", "now", "then",
+            "were", "have", "has", "had", "would", "could", "will", "do",
+        }
+
+        def tokenize(text: str) -> set:
+            """Lower-case alpha tokens, drop stop-words, keep words >= 3 chars."""
+            tokens = re.findall(r"[a-zA-Z]{3,}", text.lower())
+            return {t for t in tokens if t not in STOP_WORDS}
+
+        def score_match(block_tokens: set, cue_text: str) -> int:
+            """Token overlap count between block narration and cue text."""
+            cue_tokens = tokenize(cue_text)
+            if not cue_tokens:
+                return 0
+            return len(block_tokens & cue_tokens)
+
+        # Pre-tokenise all blocks once
+        block_token_sets = [tokenize(b.narration_text) for b in blocks]
+
+        # Find best-matching cue for each block (greedy, forward-only)
+        anchors: List[float] = []  # matched movie_start for each block
+        prev_anchor = 0.0
+
+        for b_idx, block in enumerate(blocks):
+            b_tokens = block_token_sets[b_idx]
+
+            if not b_tokens:
+                # No meaningful tokens → keep original timestamp
+                anchors.append(block.movie_start)
+                continue
+
+            best_score = 0
+            best_cue_start = None
+
+            for cue in dialogue_timeline:
+                cue_start = float(cue.get("start", 0.0))
+                # Only consider cues AFTER previous anchor (chronological lock)
+                if cue_start < prev_anchor:
+                    continue
+                sc = score_match(b_tokens, cue.get("text", ""))
+                if sc > best_score:
+                    best_score = sc
+                    best_cue_start = cue_start
+
+            if best_score > 0 and best_cue_start is not None:
+                anchor_start = max(prev_anchor, best_cue_start)
+                anchors.append(anchor_start)
+                prev_anchor = anchor_start
+            else:
+                # No match → keep original AI timestamp but respect chronological order
+                fallback = max(prev_anchor, block.movie_start)
+                anchors.append(fallback)
+                prev_anchor = fallback
+
+        # Apply anchors back to SceneBlocks
+        for b_idx, block in enumerate(blocks):
+            new_start = anchors[b_idx]
+            # Compute window: preserve original span but clamp to [min, max]
+            original_span = max(min_scene_dur, block.movie_end - block.movie_start)
+            clamped_span = min(original_span, max_scene_dur)
+            new_end = round(new_start + clamped_span, 2)
+            block.movie_start = round(new_start, 2)
+            block.movie_end = new_end
 
         return blocks
 
@@ -797,12 +952,13 @@ class ScriptEngine:
             if coverage_pct < 0.85:
                 return False, f"Timeline coverage insufficient (covers {coverage_pct*100:.1f}%, minimum required 85%). Missing ending/climax."
 
-        # 2. Word Budget Check
-        words = script_text.split()
+        # 2. Word Budget Check (Measured on clean spoken narration)
+        clean_narr, _, _ = ScriptEngine.parse_storyboard(script_text)
+        spoken_words = len(clean_narr.split()) if clean_narr else len(script_text.split())
         target_words = ScriptEngine.calculate_target_words(target_duration_mins, voice_speed, target_lang)
         min_allowed = int(target_words * 0.40)
-        if len(words) < min_allowed:
-            return False, f"Script is severely under-budget ({len(words)} words, minimum expected {min_allowed})."
+        if spoken_words < min_allowed:
+            return False, f"Script is severely under-budget ({spoken_words} spoken words, minimum expected {min_allowed})."
 
         return True, "Script passed all universal integrity gates."
 
@@ -964,8 +1120,10 @@ NARRATIVE STRUCTURE:
 {cfg['structure']}
 
 FORMATTING & AI DIRECTOR REQUIREMENTS:
-1. SCENE TIMESTAMPS: For each narrative scene block, include a timestamp bracket mapping directly to the source movie/video timeline, e.g. [SCENE: 03:15 - 03:20] or [03:15 - 03:20].
+1. SCENE TIMESTAMPS & DIALOGUE ANCHORING: For each narrative scene block, include a timestamp bracket mapping directly to the source movie/video timeline, e.g. [SCENE: 03:15 - 03:20] or [03:15 - 03:20].
    - MANDATORY: Anchor your timestamps to the chronological Full-Movie Roadmap and 5-Act Milestones above!
+   - Match your timestamps directly to the actual dialogues/events in the Roadmap. When narrating what a character says, or a major action (gunfire, chase, explosion, confrontation), use the real timestamp from the dialogue roadmap where that event happens.
+   - Do NOT invent arbitrary or fictional timestamps. The video studio cuts the exact video footage at these timestamps to sync with your voiceover!
    - Every scene MUST begin with [SCENE: MM:SS - MM:SS] followed immediately by [VOICEOVER].
    - The scene timestamps MUST progress chronologically across the entire film from Act 1 (opening) through Act 2 (middle) to Act 3 (climax) and Epilogue (ending).
    - NEVER stay in the first 10 or 50 minutes of the movie. Visuals are auto-sliced from these exact timestamps!
@@ -1080,6 +1238,8 @@ TASK: Elaborate, expand and enrich the story across Act 1, Act 2, and Act 3 with
                         target_lang=target_lang,
                         voice_speed=voice_speed
                     )
+                    clean_narr, _, _ = ScriptEngine.parse_storyboard(nine_text)
+                    spoken_word_count = len(clean_narr.split()) if clean_narr else len(nine_text.split())
                     hook_metrics = ScriptEngine.calculate_hook_score(nine_text, target_lang)
                     return {
                         "success": True,
@@ -1088,7 +1248,8 @@ TASK: Elaborate, expand and enrich the story across Act 1, Act 2, and Act 3 with
                         "language": target_lang,
                         "genre": genre,
                         "target_words": target_words,
-                        "actual_words": len(nine_text.split()),
+                        "actual_words": spoken_word_count,
+                        "raw_words": len(nine_text.split()),
                         "hook_score": hook_metrics,
                         "story_beats": story_beats or [],
                         "is_valid": is_valid,
@@ -1122,6 +1283,8 @@ TASK: Elaborate, expand and enrich the story across Act 1, Act 2, and Act 3 with
                                 target_lang=target_lang,
                                 voice_speed=voice_speed
                             )
+                            clean_narr_g, _, _ = ScriptEngine.parse_storyboard(text)
+                            spoken_word_count_g = len(clean_narr_g.split()) if clean_narr_g else len(text.split())
                             hook_metrics = ScriptEngine.calculate_hook_score(text, target_lang)
                             return {
                                 "success": True,
@@ -1130,7 +1293,8 @@ TASK: Elaborate, expand and enrich the story across Act 1, Act 2, and Act 3 with
                                 "language": target_lang,
                                 "genre": genre,
                                 "target_words": target_words,
-                                "actual_words": len(text.split()),
+                                "actual_words": spoken_word_count_g,
+                                "raw_words": len(text.split()),
                                 "hook_score": hook_metrics,
                                 "story_beats": story_beats or [],
                                 "is_valid": is_valid,

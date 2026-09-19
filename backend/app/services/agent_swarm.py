@@ -91,24 +91,14 @@ class AgentSwarmEngine:
 
         # Robust Local Fallback when 9Router is offline
         detected_title = video_title_hint or "Story Recap"
-        detected_genre = "movie_recap"
-        detected_persona = "hollywood_trailer"
-        detected_mood = "suspense"
-
-        # Simple keyword heuristic fallback
-        lower_ex = excerpt.lower()
-        if any(w in lower_ex for w in ["murder", "police", "arrest", "suspect", "victim", "crime"]):
-            detected_genre = "true_crime"
-            detected_persona = "documentary"
-            detected_mood = "tense"
-        elif any(w in lower_ex for w in ["company", "apple", "steve", "billion", "market", "startup"]):
-            detected_genre = "tech_science"
-            detected_persona = "viral_fast"
-            detected_mood = "upbeat"
-        elif any(w in lower_ex for w in ["history", "war", "century", "empire", "ancient"]):
-            detected_genre = "documentary"
-            detected_persona = "documentary"
-            detected_mood = "suspense"
+        ctx = ScriptEngine.auto_detect_creative_context(
+            title=detected_title,
+            description="",
+            transcript_sample=excerpt
+        )
+        detected_genre = ctx.get("genre", "movie_recap")
+        detected_persona = ctx.get("persona", "hollywood_trailer")
+        detected_mood = ctx.get("mood", "suspense")
 
         # Fallback story beats spanning the film chronologically
         fallback_beats = [
