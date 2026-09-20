@@ -1094,7 +1094,7 @@ class ScriptEngine:
 
         beats_section = ""
         if story_beats:
-            beats_lines = ["\nChronological Story Beats Detected by Detective Agent:"]
+            beats_lines = ["\nCHRONOLOGICAL STORY BEATS DETECTED BY DETECTIVE AGENT:"]
             for b in story_beats:
                 beat_num = b.get("beat", "")
                 ts = b.get("time_range") or b.get("timestamp", "")

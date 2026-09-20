@@ -638,7 +638,7 @@ class VideoEngine:
         # Try selective sections only IF ranges have sufficient coverage and do not span across long movie timelines
         ranges_span = sum(max(0.0, e - s) for s, e in scene_ranges) if scene_ranges else 0.0
         max_range_end = max((e for s, e in scene_ranges), default=0.0) if scene_ranges else 0.0
-        if scene_ranges and len(scene_ranges) >= 6 and ranges_span >= max(180.0, speech_dur * 0.85) and max_range_end <= 180.0:
+        if scene_ranges and len(scene_ranges) >= 6 and ranges_span >= max(180.0, speech_dur * 0.85) and max_range_end <= max(300.0, speech_dur * 2.5):
             selective_ok = VideoEngine.download_youtube_sections(url, scene_ranges, sections_path, temp_dir, job_id)
             if selective_ok and os.path.exists(sections_path):
                 sec_dur = VideoEngine.get_duration(sections_path)
