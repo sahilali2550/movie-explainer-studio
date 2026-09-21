@@ -2237,3 +2237,45 @@ async function expandScript() {
     }
   }
 }
+
+// Concept 3 ("Creator Split Hub") Studio Helpers
+function addSceneBlockTemplate() {
+  const area = $('script-area');
+  if (!area) return;
+  const current = area.value.trim();
+  const template = `\n\n[SCENE: 00:00 - 00:05]\n[VOICEOVER] Enter compelling narration and dialogue for this scene here...`;
+  area.value = current ? current + template : template.trim();
+  area.focus();
+  area.scrollTop = area.scrollHeight;
+  if (typeof updateScriptStats === 'function') updateScriptStats();
+  if (typeof recalculateHook === 'function') recalculateHook();
+}
+
+function setPreviewAspect(aspect) {
+  const wrapper = $('video-preview-wrapper');
+  const btn169 = $('btn-aspect-16-9');
+  const btn916 = $('btn-aspect-9-16');
+  const selectAspect = $('select-aspect');
+
+  if (aspect === '9-16' || aspect === 'vertical') {
+    if (wrapper) wrapper.classList.add('aspect-vertical');
+    if (btn916) btn916.classList.add('active');
+    if (btn169) btn169.classList.remove('active');
+    if (selectAspect && selectAspect.value !== 'vertical') selectAspect.value = 'vertical';
+  } else {
+    if (wrapper) wrapper.classList.remove('aspect-vertical');
+    if (btn169) btn169.classList.add('active');
+    if (btn916) btn916.classList.remove('active');
+    if (selectAspect && selectAspect.value !== 'horizontal') selectAspect.value = 'horizontal';
+  }
+}
+
+// Sync aspect ratio dropdown with preview container
+document.addEventListener('DOMContentLoaded', () => {
+  const selectAspect = $('select-aspect');
+  if (selectAspect) {
+    selectAspect.addEventListener('change', () => {
+      setPreviewAspect(selectAspect.value);
+    });
+  }
+});

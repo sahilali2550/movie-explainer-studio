@@ -3,746 +3,747 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>AutoExplainer AI — Viral Movie & Drama Recap Studio</title>
+  <title>AutoExplainer AI — Creator Split Hub Studio</title>
   <link rel="stylesheet" href="/css/styles.css">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
 </head>
 <body>
 
-  <!-- App Header -->
+  <!-- Sleek Dark Mode Header Bar (#16181D) -->
   <header>
     <div class="brand">
       <div class="brand-icon">🎬</div>
       <div>
         <h1>AutoExplainer AI</h1>
       </div>
-      <span class="brand-badge">SaaS Studio</span>
+      <span class="brand-badge">Creator Hub</span>
     </div>
+
+    <div class="header-center">
+      <!-- Autopilot & Studio Mode Pills -->
+      <div class="mode-pills-group">
+        <button type="button" id="btn-studio-single" class="mode-pill active" onclick="switchStudioMode('single')">
+          🎬 Studio
+        </button>
+        <button type="button" id="btn-studio-autopilot" class="mode-pill autopilot" onclick="switchStudioMode('autopilot')">
+          ⚡ 1-Click Autopilot
+        </button>
+        <button type="button" id="btn-studio-multi" class="mode-pill" onclick="switchStudioMode('multi')">
+          🌐 Global Multiplier
+        </button>
+      </div>
+    </div>
+
     <div class="header-meta">
-      <div id="ai-status-badge" class="credit-badge" style="cursor:pointer; background:rgba(16, 185, 129, 0.15); border:1px solid rgba(16, 185, 129, 0.4); color:#34d399;" onclick="openAiSettingsModal()">
-        <span style="display:inline-block; width:8px; height:8px; border-radius:50%; background:#10b981; margin-right:4px;"></span>
-        9Router AI: <span id="ai-status-text">Checking…</span>
+      <!-- 9Router AI Status Pill -->
+      <div id="ai-status-badge" class="status-pill" onclick="openAiSettingsModal()" title="9Router AI LLM Connection">
+        <span class="status-indicator" style="background:#10b981; box-shadow:0 0 8px #10b981;"></span>
+        <span style="color:#94a3b8; font-size:0.75rem;">AI:</span>
+        <span id="ai-status-text" style="color:#34d399;">Checking…</span>
       </div>
-      <div id="yt-status-badge" class="credit-badge" style="cursor:pointer; background:rgba(239, 68, 68, 0.15); border:1px solid rgba(239, 68, 68, 0.4); color:#f87171;" onclick="openYouTubeModal()">
-        <span style="display:inline-block; width:8px; height:8px; border-radius:50%; background:#ef4444; margin-right:4px;"></span>
-        YouTube: <span id="yt-channels-count">Checking…</span>
+
+      <!-- YouTube Channels Pill -->
+      <div id="yt-status-badge" class="status-pill" onclick="openYouTubeModal()" title="YouTube OAuth 2.0 Channels">
+        <span class="status-indicator" style="background:#ef4444; box-shadow:0 0 8px #ef4444;"></span>
+        <span style="color:#94a3b8; font-size:0.75rem;">YouTube:</span>
+        <span id="yt-channels-count" style="color:#f87171;">Checking…</span>
       </div>
-      <button type="button" class="btn-secondary" style="padding:6px 12px; font-size:0.80rem;" onclick="openYouTubeModal()">📺 Channels</button>
-      <button type="button" class="btn-secondary" style="padding:6px 12px; font-size:0.80rem;" onclick="openAiSettingsModal()">⚙️ AI Settings</button>
-      <button type="button" class="btn-secondary" style="padding:6px 14px; font-size:0.80rem; border-color:#38bdf8; color:#38bdf8; background:rgba(56,189,248,0.14); white-space:nowrap; font-weight:700; cursor:pointer;" onclick="resetStudio()">🔄 Reset Studio</button>
-      <a href="/docs" target="_blank" class="btn-secondary" style="text-decoration:none;">API Docs</a>
+
+      <button type="button" class="btn-secondary" onclick="openYouTubeModal()">📺 Channels</button>
+      <button type="button" class="btn-secondary" onclick="openAiSettingsModal()">⚙️ Settings</button>
+      <button type="button" class="btn-secondary" style="border-color:#38bdf8; color:#38bdf8; background:rgba(56,189,248,0.08);" onclick="resetStudio()" title="Clear and reset studio">🔄 Reset</button>
+      <a href="/docs" target="_blank" class="btn-secondary" style="text-decoration:none;">API</a>
     </div>
   </header>
 
   <!-- Studio Main -->
   <main>
-    <!-- Top Dual Studio Mode Switcher Banner -->
-    <div class="studio-mode-banner">
-      <div class="studio-mode-pills">
-        <button type="button" id="btn-studio-single" class="mode-pill active" onclick="switchStudioMode('single')">
-          🎬 Single Language Studio
-        </button>
-        <button type="button" id="btn-studio-autopilot" class="mode-pill" style="border-color:#10b981; color:#34d399;" onclick="switchStudioMode('autopilot')">
-          ⚡ 1-Click Autopilot Mode
-        </button>
-        <button type="button" id="btn-studio-multi" class="mode-pill" onclick="switchStudioMode('multi')">
-          🌐 Global Multiplier Studio (Batch Engine)
-        </button>
-      </div>
-      <div id="studio-mode-desc" class="studio-mode-desc">
+
+    <!-- Studio Mode Subtitle -->
+    <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:1rem; flex-wrap:wrap; gap:8px;">
+      <div id="studio-mode-desc" style="font-size:0.80rem; color:var(--text-muted);">
         Standard Mode: Focus on a single high-impact story recap with full manual control and live voice audition.
       </div>
     </div>
 
-    <!-- Live Agent Swarm Activity Bar -->
-    <div id="agent-swarm-bar" class="studio-card" style="display:none; margin-bottom:1.25rem; padding:12px 16px; background:rgba(15, 23, 42, 0.95); border:1px solid rgba(16, 185, 129, 0.35);">
-      <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:10px; flex-wrap:wrap; gap:8px;">
+    <!-- Live Agent Swarm Activity Bar (Compact) -->
+    <div id="agent-swarm-bar" class="studio-card" style="display:none; padding:10px 14px; background:rgba(15, 23, 42, 0.95); border:1px solid rgba(16, 185, 129, 0.35);">
+      <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:8px;">
         <div style="display:flex; align-items:center; gap:8px;">
-          <span style="display:inline-block; width:8px; height:8px; border-radius:50%; background:#10b981; box-shadow:0 0 10px #10b981;"></span>
-          <strong style="font-size:0.88rem; color:#fff;">🤖 9Router Multi-Agent Swarm (Virtual Production Team)</strong>
+          <span style="display:inline-block; width:7px; height:7px; border-radius:50%; background:#10b981; box-shadow:0 0 8px #10b981;"></span>
+          <strong style="font-size:0.82rem; color:#fff;">Multi-Agent Swarm (Virtual Production Team)</strong>
         </div>
-        <span id="swarm-overall-status" style="font-size:0.75rem; color:#34d399; font-weight:600;">Standby • Ready for 1-Click Launch</span>
+        <span id="swarm-overall-status" style="font-size:0.74rem; color:#34d399; font-weight:600;">Standby • Ready for 1-Click Launch</span>
       </div>
-      <div style="display:grid; grid-template-columns:repeat(auto-fit, minmax(170px, 1fr)); gap:8px;">
-        <div class="agent-chip" id="agent-chip-detective" style="background:rgba(255,255,255,0.04); border:1px solid rgba(255,255,255,0.08); border-radius:6px; padding:6px 10px; font-size:0.75rem; color:#cbd5e1;">
+      <div style="display:grid; grid-template-columns:repeat(auto-fit, minmax(150px, 1fr)); gap:6px; margin-top:6px;">
+        <div class="agent-chip" id="agent-chip-detective" style="background:rgba(255,255,255,0.03); border:1px solid var(--border-subtle); border-radius:6px; padding:4px 8px; font-size:0.72rem; color:#cbd5e1;">
           🕵️ <strong>Detective:</strong> <span id="agent-status-detective" style="color:#94a3b8;">Ready</span>
         </div>
-        <div class="agent-chip" id="agent-chip-screenwriter" style="background:rgba(255,255,255,0.04); border:1px solid rgba(255,255,255,0.08); border-radius:6px; padding:6px 10px; font-size:0.75rem; color:#cbd5e1;">
-          ✍️ <strong>Screenwriter:</strong> <span id="agent-status-screenwriter" style="color:#94a3b8;">Standby</span>
+        <div class="agent-chip" id="agent-chip-screenwriter" style="background:rgba(255,255,255,0.03); border:1px solid var(--border-subtle); border-radius:6px; padding:4px 8px; font-size:0.72rem; color:#cbd5e1;">
+          ✍️ <strong>Writer:</strong> <span id="agent-status-screenwriter" style="color:#94a3b8;">Standby</span>
         </div>
-        <div class="agent-chip" id="agent-chip-hook" style="background:rgba(255,255,255,0.04); border:1px solid rgba(255,255,255,0.08); border-radius:6px; padding:6px 10px; font-size:0.75rem; color:#cbd5e1;">
-          🎯 <strong>Hook Critic:</strong> <span id="agent-status-hook" style="color:#94a3b8;">Standby</span>
+        <div class="agent-chip" id="agent-chip-hook" style="background:rgba(255,255,255,0.03); border:1px solid var(--border-subtle); border-radius:6px; padding:4px 8px; font-size:0.72rem; color:#cbd5e1;">
+          🎯 <strong>Hook:</strong> <span id="agent-status-hook" style="color:#94a3b8;">Standby</span>
         </div>
-        <div class="agent-chip" id="agent-chip-art" style="background:rgba(255,255,255,0.04); border:1px solid rgba(255,255,255,0.08); border-radius:6px; padding:6px 10px; font-size:0.75rem; color:#cbd5e1;">
-          🎨 <strong>Art Director:</strong> <span id="agent-status-art" style="color:#94a3b8;">Standby</span>
+        <div class="agent-chip" id="agent-chip-art" style="background:rgba(255,255,255,0.03); border:1px solid var(--border-subtle); border-radius:6px; padding:4px 8px; font-size:0.72rem; color:#cbd5e1;">
+          🎨 <strong>Art:</strong> <span id="agent-status-art" style="color:#94a3b8;">Standby</span>
         </div>
-        <div class="agent-chip" id="agent-chip-seo" style="background:rgba(255,255,255,0.04); border:1px solid rgba(255,255,255,0.08); border-radius:6px; padding:6px 10px; font-size:0.75rem; color:#cbd5e1;">
-          🏷️ <strong>SEO Agent:</strong> <span id="agent-status-seo" style="color:#94a3b8;">Standby</span>
+        <div class="agent-chip" id="agent-chip-seo" style="background:rgba(255,255,255,0.03); border:1px solid var(--border-subtle); border-radius:6px; padding:4px 8px; font-size:0.72rem; color:#cbd5e1;">
+          🏷️ <strong>SEO:</strong> <span id="agent-status-seo" style="color:#94a3b8;">Standby</span>
         </div>
       </div>
     </div>
 
-    <div class="studio-grid">
+    <!-- Creator Split Hub (40% - 60% Layout) -->
+    <div class="creator-split-hub">
 
-      <!-- Column 1: Source & Narrative Setup -->
-      <div class="studio-card">
-        <div class="card-header" style="display:flex; justify-content:space-between; align-items:center;">
-          <div style="display:flex; align-items:center; gap:8px;">
-            <div class="step-num">1</div>
-            <h2>Source & Story Setup</h2>
+      <!-- ================================================================
+           LEFT PANEL (40% Width - Director's Script Desk)
+           ================================================================ -->
+      <div class="studio-panel">
+
+        <!-- 1. Source Media & Story Setup Card -->
+        <div class="studio-card">
+          <div class="card-title-row">
+            <div class="card-title-badge">
+              <div class="card-step-badge">1</div>
+              <h2>Media Source & Setup</h2>
+            </div>
+            <button type="button" class="btn-secondary" style="font-size:0.72rem; padding:3px 8px;" onclick="triggerContextAutoDetect()" title="Auto-detect Title, Genre, Tone & BGM">
+              ⚡ Auto-Detect
+            </button>
           </div>
-          <button type="button" class="btn-secondary" style="padding:4px 10px; font-size:0.75rem; border-color:#38bdf8; color:#38bdf8; background:rgba(56,189,248,0.14); white-space:nowrap; font-weight:600; cursor:pointer;" onclick="resetStudio()" title="Clear form and start a fresh video project">
-            🔄 Reset Studio
+
+          <!-- Video Ingestion Pills -->
+          <div class="form-group">
+            <div class="tab-pills">
+              <button type="button" id="tab-url" class="tab-btn active" onclick="switchSourceTab('url')">🔗 YouTube Link</button>
+              <button type="button" id="tab-file" class="tab-btn" onclick="switchSourceTab('file')">📁 Local Video</button>
+            </div>
+          </div>
+
+          <div id="group-url" class="form-group">
+            <input type="text" id="input-url" placeholder="https://www.youtube.com/watch?v=...">
+          </div>
+
+          <div id="group-file" class="form-group" style="display:none;">
+            <input type="file" id="input-file" accept="video/mp4,video/mkv,video/mov">
+          </div>
+
+          <!-- Optional Direct Transcript Accordion -->
+          <div class="form-group" style="margin-top:-2px;">
+            <details style="background:rgba(255,255,255,0.02); border:1px solid var(--border-subtle); border-radius:var(--radius-sm); padding:6px 10px;">
+              <summary style="font-size:0.75rem; font-weight:600; color:var(--accent-cyan); cursor:pointer; user-select:none;">
+                📋 Direct Transcript / SRT <span style="font-size:0.68rem; color:#10b981; margin-left:4px;">⚡ 5-Sec Script (0s Wait)</span>
+              </summary>
+              <div style="margin-top:6px;">
+                <textarea id="input-transcript" rows="3" style="width:100%; font-size:0.75rem; resize:vertical;" placeholder="Optional: Paste YouTube/SRT transcript here to skip download..."></textarea>
+              </div>
+            </details>
+          </div>
+
+          <!-- Story Title & Wikipedia Plot -->
+          <div class="form-group">
+            <label for="input-title">
+              <span id="label-title-text">Story / Movie Title</span>
+              <span style="font-size:0.70rem; color:var(--accent-cyan);">Auto-detected or custom</span>
+            </label>
+            <div style="display:flex; gap:6px;">
+              <input type="text" id="input-title" placeholder="e.g. Inception (2010)" style="flex:1;">
+              <button type="button" class="btn-secondary" id="btn-fetch-wiki" style="padding:4px 10px; font-size:0.74rem; border-color:#818cf8; color:#a5b4fc; background:rgba(99,102,241,0.12); white-space:nowrap;" onclick="fetchWikipediaPlot()" title="Fetch plot from Wikipedia">
+                📖 Wiki
+              </button>
+            </div>
+            <div id="wiki-fetch-status" style="display:none; font-size:0.72rem; margin-top:2px;"></div>
+          </div>
+
+          <!-- Hidden compatibility language mode tabs -->
+          <div style="display:none;">
+            <button type="button" id="tab-lang-single" onclick="switchLangMode('single')"></button>
+            <button type="button" id="tab-lang-multi" onclick="switchLangMode('multi')"></button>
+          </div>
+
+          <!-- Target Language (Single Mode) -->
+          <div id="group-single-lang" class="form-group">
+            <label for="select-lang">Target Language</label>
+            <select id="select-lang" onchange="onLanguageChange()">
+              <optgroup label="Tier 1 — High Viral Recaps">
+                <option value="es">Spanish (Español) — Resumen de Películas</option>
+                <option value="id">Indonesian (Bahasa) — Alur Cerita Film</option>
+                <option value="pt">Portuguese (Brasil) — Resumo de Filmes</option>
+                <option value="ur" selected>Urdu (اردو) — مکمل کہانی اور انجام</option>
+                <option value="hi">Hindi (हिन्दी) — मूवी एक्सप्लेनेशन</option>
+                <option value="en">English — Viral Movie Recap</option>
+              </optgroup>
+              <optgroup label="Tier 2 — High CPM Earnings">
+                <option value="ar">Arabic (العربية) — ملخص أفلام</option>
+                <option value="de">German (Deutsch) — Film Zusammenfassung</option>
+                <option value="fr">French (Français) — Résumé de Film</option>
+                <option value="ru">Russian (Русский) — Пересказ Фильма</option>
+                <option value="it">Italian (Italiano)</option>
+                <option value="tr">Turkish (Türkçe)</option>
+              </optgroup>
+              <optgroup label="Tier 3 — Fast-Growing Asian Markets">
+                <option value="vi">Vietnamese (Tiếng Việt)</option>
+                <option value="th">Thai (ไทย)</option>
+                <option value="ja">Japanese (日本語)</option>
+                <option value="ko">Korean (한국어)</option>
+              </optgroup>
+            </select>
+          </div>
+
+          <!-- Multi-Language Batch Selection (Global Multiplier Mode) -->
+          <div id="group-multi-lang" class="form-group" style="display:none;">
+            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:4px;">
+              <label style="margin:0; font-weight:700;">Global Languages Selection:</label>
+              <span id="batch-count-badge" class="pacing-badge">3 Selected</span>
+            </div>
+            <div class="preset-chips-row" style="margin-bottom:6px;">
+              <span style="font-size:0.68rem; color:var(--text-muted);">Presets:</span>
+              <button type="button" class="preset-chip active" id="chip-preset-big3" onclick="applyLangPreset('viral_big3')">🔥 Big-3 (EN, ES, UR)</button>
+              <button type="button" class="preset-chip" id="chip-preset-cpm" onclick="applyLangPreset('high_cpm')">💎 High CPM (EN, DE, FR, AR)</button>
+              <button type="button" class="preset-chip" id="chip-preset-asia" onclick="applyLangPreset('asian_growth')">🚀 Asian (ID, HI, VN, TH)</button>
+              <button type="button" class="preset-chip" onclick="applyLangPreset('all')">⚡ All</button>
+              <button type="button" class="preset-chip" onclick="applyLangPreset('clear')">✕</button>
+            </div>
+            <div style="display:grid; grid-template-columns:1fr 1fr; gap:4px; background:var(--bg-input); padding:6px; border-radius:6px; border:1px solid var(--border-subtle); font-size:0.75rem;">
+              <label style="color:#fff; cursor:pointer;"><input type="checkbox" class="batch-lang-cb" value="en" checked onchange="onBatchLangChange()"> 🇺🇸 English</label>
+              <label style="color:#fff; cursor:pointer;"><input type="checkbox" class="batch-lang-cb" value="es" checked onchange="onBatchLangChange()"> 🇪🇸 Spanish</label>
+              <label style="color:#fff; cursor:pointer;"><input type="checkbox" class="batch-lang-cb" value="ur" checked onchange="onBatchLangChange()"> 🇵🇰 Urdu</label>
+              <label style="color:#fff; cursor:pointer;"><input type="checkbox" class="batch-lang-cb" value="id" onchange="onBatchLangChange()"> 🇮🇩 Indonesian</label>
+              <label style="color:#fff; cursor:pointer;"><input type="checkbox" class="batch-lang-cb" value="hi" onchange="onBatchLangChange()"> 🇮🇳 Hindi</label>
+              <label style="color:#fff; cursor:pointer;"><input type="checkbox" class="batch-lang-cb" value="ar" onchange="onBatchLangChange()"> 🇸🇦 Arabic</label>
+              <label style="color:#fff; cursor:pointer;"><input type="checkbox" class="batch-lang-cb" value="pt" onchange="onBatchLangChange()"> 🇧🇷 Portuguese</label>
+              <label style="color:#fff; cursor:pointer;"><input type="checkbox" class="batch-lang-cb" value="fr" onchange="onBatchLangChange()"> 🇫🇷 French</label>
+              <label style="color:#fff; cursor:pointer;"><input type="checkbox" class="batch-lang-cb" value="de" onchange="onBatchLangChange()"> 🇩🇪 German</label>
+              <label style="color:#fff; cursor:pointer;"><input type="checkbox" class="batch-lang-cb" value="ru" onchange="onBatchLangChange()"> 🇷🇺 Russian</label>
+              <label style="color:#fff; cursor:pointer;"><input type="checkbox" class="batch-lang-cb" value="vi" onchange="onBatchLangChange()"> 🇻🇳 Vietnamese</label>
+              <label style="color:#fff; cursor:pointer;"><input type="checkbox" class="batch-lang-cb" value="th" onchange="onBatchLangChange()"> 🇹🇭 Thai</label>
+            </div>
+          </div>
+
+          <!-- Genre, Duration & Speed Row -->
+          <div style="display:grid; grid-template-columns:1fr 1fr; gap:8px;">
+            <div class="form-group">
+              <label for="select-genre">
+                <span>Genre</span>
+                <span id="genre-badge" style="font-size:0.68rem; color:var(--accent-cyan);">Universal</span>
+              </label>
+              <select id="select-genre" onchange="onGenreChange()">
+                <option value="movie_recap" selected>🎬 Movie Recap</option>
+                <option value="biography">👤 Biography</option>
+                <option value="documentary">🔍 Documentary</option>
+                <option value="true_crime">🕵️ True Crime</option>
+                <option value="tech_science">💡 Tech / Case Study</option>
+                <option value="video_essay">📝 Video Essay</option>
+              </select>
+            </div>
+
+            <div class="form-group">
+              <label for="select-duration">Duration</label>
+              <select id="select-duration" onchange="updateEstimatedWordCount()">
+                <option value="1">1 Min (Short)</option>
+                <option value="3" selected>3 Mins (Recap)</option>
+                <option value="5">5 Mins (Deep Dive)</option>
+                <option value="10">10 Mins (Full)</option>
+              </select>
+            </div>
+          </div>
+
+          <div class="form-group">
+            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:2px;">
+              <label for="select-speed" style="margin:0;">Pacing / Velocity</label>
+              <span id="target-words-badge" class="pacing-badge">~480 Words</span>
+            </div>
+            <select id="select-speed" onchange="updateEstimatedWordCount()">
+              <option value="normal">Normal Pace (~135 WPM)</option>
+              <option value="fast" selected>Fast Cinematic (+15% • ~160 WPM)</option>
+              <option value="ultra_fast">Ultra-Fast (+20% • ~185 WPM)</option>
+            </select>
+          </div>
+
+          <div class="form-group">
+            <label for="input-notes">Director Notes / Hook Angle (Optional)</label>
+            <input type="text" id="input-notes" placeholder="e.g. Emphasize the plot twist in scene 4...">
+          </div>
+
+          <!-- Primary Script Generation Trigger Button -->
+          <button type="button" id="btn-gen-script" class="btn-primary" style="width:100%;" onclick="generateStoryScript()">
+            <span id="btn-gen-script-text">🧠 1. Generate Storyboard Script</span>
+          </button>
+
+          <button type="button" id="btn-run-autopilot" class="btn-render-hero" style="display:none;" onclick="runAutopilotWorkflow()">
+            <span id="btn-run-autopilot-text">🚀 Run 1-Click Autopilot Explainer</span>
           </button>
         </div>
 
-        <!-- Video Source Toggle -->
-        <div class="form-group">
-          <label>Video Ingestion</label>
-          <div class="tab-pills">
-            <button type="button" id="tab-url" class="tab-btn active" onclick="switchSourceTab('url')">🔗 YouTube Link</button>
-            <button type="button" id="tab-file" class="tab-btn" onclick="switchSourceTab('file')">📁 Local Video</button>
+        <!-- 2. Storyboard Script Workspace Card -->
+        <div class="studio-card script-workspace-card">
+          <div class="card-title-row">
+            <div class="card-title-badge">
+              <div class="card-step-badge">2</div>
+              <h2 id="script-area-label">Storyboard Script Workspace</h2>
+            </div>
+            <span id="script-stats" style="font-size:0.75rem; color:var(--text-muted); font-weight:600;">0 Words</span>
+          </div>
+
+          <!-- Multi-Script Deck (Global Multiplier Mode) -->
+          <div id="multi-script-controls" style="display:none;">
+            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:4px;">
+              <span style="font-size:0.74rem; font-weight:700; color:var(--accent-cyan);">Multi-Script Deck</span>
+              <button type="button" id="btn-translate-all" class="btn-secondary" style="padding:2px 8px; font-size:0.70rem; color:var(--accent-cyan);" onclick="translateAllLanguageScripts()">
+                🌐 Translate All
+              </button>
+            </div>
+            <div id="multi-script-tabs-bar" class="multi-script-tabs"></div>
+          </div>
+
+          <!-- Editor Area -->
+          <div class="script-editor-wrapper">
+            <textarea id="script-area" class="script-area" placeholder="Click 'Generate Storyboard Script' or type/paste your script with timestamps [00:00 - 00:05]..."></textarea>
+          </div>
+
+          <!-- Script Tools Row -->
+          <div class="script-tools-bar">
+            <div class="script-tools-group">
+              <button type="button" class="btn-secondary" onclick="clearScript()" title="Clear editor">Clear</button>
+              <button type="button" class="btn-secondary" onclick="addSceneBlockTemplate()" title="Insert new timestamp block">+ Add Scene</button>
+              <button type="button" id="btn-expand-script" class="btn-secondary" style="border-color:#f59e0b; color:#fbbf24;" onclick="expandScript()">⚡ Expand</button>
+            </div>
+            <div class="hook-meter-compact" onclick="recalculateHook()" style="cursor:pointer;" title="Click to recalculate hook score">
+              <span>Hook:</span>
+              <span id="hook-score-badge" class="hook-badge">Check Score 🔥</span>
+            </div>
           </div>
         </div>
 
-        <div id="group-url" class="form-group">
-          <input type="text" id="input-url" placeholder="https://www.youtube.com/watch?v=...">
-        </div>
+        <!-- 3. Voiceover & Audio Engine Card -->
+        <div class="studio-card">
+          <div class="card-title-row">
+            <div class="card-title-badge">
+              <div class="card-step-badge">3</div>
+              <h2>Narrator Voice & Audio</h2>
+            </div>
+            <button type="button" class="btn-secondary" style="padding:3px 8px; font-size:0.72rem;" onclick="auditionVoice()">🔊 Audition</button>
+          </div>
 
-        <div id="group-file" class="form-group" style="display:none;">
-          <input type="file" id="input-file" accept="video/mp4,video/mkv,video/mov">
-        </div>
+          <div id="box-voice-ai" class="form-group">
+            <label for="select-voice">Narrator Voice</label>
+            <select id="select-voice">
+              <!-- Dynamically populated per language -->
+            </select>
+          </div>
 
-        <!-- Optional Direct Transcript Input (10x Speed Booster) -->
-        <div class="form-group" style="margin-top: -4px;">
-          <details style="background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.1); border-radius: 8px; padding: 8px 12px;">
-            <summary style="font-size: 0.78rem; font-weight: 600; color: #38bdf8; cursor: pointer; user-select: none;">
-              📋 Paste Transcript / Dialogues Directly <span style="font-size: 0.70rem; color: #10b981; font-weight: normal; margin-left: 6px;">⚡ 5-Sec Script (0s Wait)</span>
+          <!-- Multi-Voice Casting Manager (Global Multiplier Mode) -->
+          <div id="multi-voice-casting-section" style="display:none;">
+            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:4px;">
+              <label style="font-size:0.78rem; font-weight:700; color:#fff; margin:0;">👥 Multi-Voice Casting Manager</label>
+              <span style="font-size:0.70rem; color:var(--accent-cyan);">Per Language</span>
+            </div>
+            <div id="multi-voice-casting-container" class="multi-voice-casting-grid"></div>
+          </div>
+
+          <!-- Collapsible Advanced Studio Controls -->
+          <details style="background:rgba(255,255,255,0.02); border:1px solid var(--border-subtle); border-radius:var(--radius-sm); padding:8px 10px;">
+            <summary style="font-size:0.76rem; font-weight:600; color:var(--accent-cyan); cursor:pointer; user-select:none;">
+              ⚙️ Advanced Audio & Video Controls (Clone, SFX, 1080p, Watermark)
             </summary>
-            <div style="margin-top: 8px;">
-              <textarea id="input-transcript" rows="4" style="width: 100%; font-size: 0.76rem; background: #0b1120; border: 1px solid rgba(255,255,255,0.12); border-radius: 6px; padding: 8px; color: #cbd5e1; resize: vertical;" placeholder="Optional: Copy & paste transcript from YouTube ('Show Transcript' button) or SRT/VTT. The AI will skip downloading subtitles from YouTube and produce your storyboard script in 5 seconds!"></textarea>
+            <div style="margin-top:8px; display:flex; flex-direction:column; gap:8px;">
+              <!-- Voice Mode Selector Tabs -->
+              <div class="form-group">
+                <label>Voice Source Mode</label>
+                <div class="tab-pills">
+                  <button type="button" id="tab-voice-ai" class="tab-btn active" onclick="switchVoiceMode('ai')">🎙️ AI</button>
+                  <button type="button" id="tab-voice-custom" class="tab-btn" onclick="switchVoiceMode('custom_audio')">📁 Audio</button>
+                  <button type="button" id="tab-voice-clone" class="tab-btn" onclick="switchVoiceMode('clone')">⚡ Clone</button>
+                </div>
+              </div>
+
+              <!-- Mode B: Custom Audio Upload -->
+              <div id="box-voice-custom" class="form-group" style="display:none; padding:8px; border-radius:6px; background:rgba(168, 85, 247, 0.08); border:1px dashed rgba(168, 85, 247, 0.4);">
+                <label style="font-size:0.74rem; color:#e9d5ff;">Select Pre-recorded Voiceover (.mp3/.wav)</label>
+                <input type="file" id="input-custom-audio" accept="audio/*" onchange="onCustomAudioSelected(this)" style="font-size:0.74rem;">
+                <div id="custom-audio-info" style="display:none; font-size:0.72rem; color:#34d399; margin-top:4px;">
+                  ⏱️ Audio Duration: <span id="custom-audio-dur-text">0s</span> • Auto-sync!
+                </div>
+              </div>
+
+              <!-- Mode C: Voice Clone -->
+              <div id="box-voice-clone" class="form-group" style="display:none; padding:8px; border-radius:6px; background:rgba(56, 189, 248, 0.08); border:1px dashed rgba(56, 189, 248, 0.4);">
+                <label style="font-size:0.74rem; color:#bae6fd;">Upload 20-60s Voice Clip</label>
+                <input type="file" id="input-clone-sample" accept="audio/*" onchange="onCloneSampleSelected(this)" style="font-size:0.74rem;">
+                <div style="display:flex; justify-content:space-between; align-items:center; margin-top:4px;">
+                  <span id="clone-status-text" style="font-size:0.70rem; color:#94a3b8;">Captures pitch</span>
+                  <button type="button" id="btn-preview-clone" class="btn-secondary" style="padding:2px 6px; font-size:0.70rem;" onclick="previewClonedVoice()">🎧 Preview</button>
+                </div>
+              </div>
+
+              <!-- Soundtrack Design -->
+              <div class="form-group">
+                <label for="select-audio-mode">Soundtrack Design Mode</label>
+                <select id="select-audio-mode" onchange="onAudioModeChange()">
+                  <option value="hybrid" selected>🎵 + 💥 Hybrid (Music + Dynamic SFX Hits)</option>
+                  <option value="sfx_only">💥 Pure SFX (No Music • Halal Friendly)</option>
+                  <option value="music_only">🎵 Music Only (Mood Score)</option>
+                </select>
+              </div>
+
+              <div id="group-bgm" class="form-group">
+                <label for="select-bgm">
+                  <span>Royalty-Free Mood Score</span>
+                  <span id="bgm-status-hint" style="font-size:0.68rem; color:var(--text-muted);">Ducked under speech</span>
+                </label>
+                <select id="select-bgm">
+                  <option value="auto" selected>✨ Auto-Match Mood</option>
+                  <option value="suspense">Dark Suspense & Mystery</option>
+                  <option value="tense">Intense Action & Horror</option>
+                  <option value="emotional">Emotional Drama & Melancholy</option>
+                  <option value="upbeat">Upbeat & Quirky</option>
+                </select>
+              </div>
+
+              <!-- Video Aspect Ratio -->
+              <div class="form-group">
+                <label for="select-aspect">Video Aspect Ratio</label>
+                <select id="select-aspect">
+                  <option value="vertical" selected>9:16 Vertical (TikTok, Reels, Shorts)</option>
+                  <option value="horizontal">16:9 Landscape (YouTube Full Video)</option>
+                  <option value="square">1:1 Square (Facebook / IG Feed)</option>
+                </select>
+              </div>
+
+              <div class="form-group" style="flex-direction:row; align-items:center; gap:6px;">
+                <input type="checkbox" id="check-subs" checked style="width:auto;">
+                <label for="check-subs" style="margin:0; cursor:pointer; font-size:0.76rem;">Burn Subtitles (.ass / libass)</label>
+              </div>
+
+              <!-- Resolution & Watermark -->
+              <div class="form-group">
+                <label for="select-resolution">Resolution</label>
+                <select id="select-resolution">
+                  <option value="720p" selected>⚡ 720p HD (3x Faster)</option>
+                  <option value="1080p">🎬 1080p Full HD</option>
+                </select>
+              </div>
+
+              <div class="form-group">
+                <label for="input-watermark">Watermark (Optional)</label>
+                <input type="text" id="input-watermark" placeholder="@MyCinemaRecaps">
+              </div>
+
+              <!-- Persona & Spoiler Settings -->
+              <div class="form-group">
+                <label for="select-persona">Persona Tone</label>
+                <select id="select-persona">
+                  <option value="auto" selected>✨ Auto-Detect Tone</option>
+                  <option value="hollywood_trailer">🎬 Hollywood Trailer</option>
+                  <option value="viral_fast">⚡ Viral Fast-Paced</option>
+                  <option value="sarcastic_roaster">🍿 Sarcastic Roaster</option>
+                  <option value="documentary">🔍 Crime Documentary</option>
+                </select>
+              </div>
+
+              <div class="form-group">
+                <label for="select-spoiler">Ending Setting</label>
+                <select id="select-spoiler">
+                  <option value="full_recap" selected>Reveal Full Ending (Full Recap)</option>
+                  <option value="cliffhanger_teaser">Stop Before Twist (Cliffhanger)</option>
+                </select>
+              </div>
+
+              <!-- Export Mode (Multi-Language) -->
+              <div id="export-mode-controls" class="form-group" style="display:none;">
+                <label style="font-weight:700; color:var(--accent-cyan);">Export Architecture</label>
+                <div style="display:flex; flex-direction:column; gap:4px; font-size:0.75rem;">
+                  <label style="display:flex; gap:6px; cursor:pointer;">
+                    <input type="radio" name="export-mode" id="export-mode-audio-pack" value="youtube_audio_pack" checked style="width:auto;">
+                    <span>YouTube Multi-Audio Pack (1 Video + Multi Dubs)</span>
+                  </label>
+                  <label style="display:flex; gap:6px; cursor:pointer;">
+                    <input type="radio" name="export-mode" id="export-mode-independent" value="independent_videos" style="width:auto;">
+                    <span>Separate Channel MP4s (Independent Files)</span>
+                  </label>
+                </div>
+              </div>
+
             </div>
           </details>
         </div>
 
-        <!-- Auto-Detect Context Trigger -->
-        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
-          <span style="font-size:0.72rem; color:#94a3b8;">Auto-detects Title, Genre, Tone & BGM</span>
-          <button type="button" class="btn-secondary" style="font-size:0.74rem; padding:3px 10px; border-color:#10b981; color:#34d399;" onclick="triggerContextAutoDetect()">
-            ⚡ Auto-Detect Story Context
-          </button>
-        </div>
+      </div>
 
-        <!-- Universal Content Genre Selection -->
-        <div class="form-group">
-          <label for="select-genre">
-            <span>Content Genre & Format</span>
-            <span id="genre-badge" style="font-size:0.72rem; color:var(--accent-cyan); font-weight:600;">Universal</span>
-          </label>
-          <select id="select-genre" onchange="onGenreChange()">
-            <option value="movie_recap" selected>🎬 Movie / Drama Recap (Suspense, Twists & Character Arcs)</option>
-            <option value="biography">👤 Biography & Real Story (Early Life, Turning Points & Legacy)</option>
-            <option value="documentary">🔍 Documentary & History (Historical Events, Science & Nature)</option>
-            <option value="true_crime">🕵️ True Crime & Mystery (Forensics, Timeline & Cold Cases)</option>
-            <option value="tech_science">💡 Tech & Business Case Studies (Market Battles, Inventions & Lessons)</option>
-            <option value="video_essay">📝 Video Essay & Cultural Analysis (Deep Dives & Perspective)</option>
-          </select>
-        </div>
+      <!-- ================================================================
+           RIGHT PANEL (60% Width - Interactive Studio Deck)
+           ================================================================ -->
+      <div class="studio-panel">
 
-        <!-- Movie / Video Title Input -->
-        <div class="form-group">
-          <label for="input-title">
-            <span id="label-title-text">Story / Video Title</span>
-            <span style="font-size:0.72rem; color:var(--accent-cyan); font-weight:normal;">Auto-detected or custom</span>
-          </label>
-          <div style="display:flex; gap:8px;">
-            <input type="text" id="input-title" placeholder="e.g. Inception (2010) or Steve Jobs Story" style="flex:1;">
-            <button type="button" class="btn-secondary" id="btn-fetch-wiki" style="padding:6px 12px; font-size:0.75rem; border-color:#818cf8; color:#a5b4fc; background:rgba(99,102,241,0.14); white-space:nowrap; cursor:pointer;" onclick="fetchWikipediaPlot()" title="Fetch movie plot directly from Wikipedia">
-              📖 Wikipedia Plot
+        <!-- 1. Live Preview Monitor -->
+        <div class="preview-monitor-card">
+          <div class="preview-monitor-header">
+            <div style="display:flex; align-items:center; gap:8px;">
+              <span style="width:8px; height:8px; border-radius:50%; background:#10b981; box-shadow:0 0 6px #10b981;"></span>
+              <h3 style="font-size:0.90rem; font-weight:700; color:#fff;">Live Preview Monitor</h3>
+            </div>
+            <!-- Aspect Ratio Switcher Controls -->
+            <div class="aspect-ratio-toggle-group">
+              <button type="button" class="aspect-btn active" id="btn-aspect-16-9" onclick="setPreviewAspect('16-9')">16:9 Landscape</button>
+              <button type="button" class="aspect-btn" id="btn-aspect-9-16" onclick="setPreviewAspect('9-16')">9:16 Vertical</button>
+            </div>
+          </div>
+
+          <!-- Video Monitor Container -->
+          <div class="video-container" id="video-preview-wrapper">
+            <video id="result-player" controls preload="metadata"></video>
+          </div>
+
+          <!-- Video Monitor Action Bar -->
+          <div style="display:flex; justify-content:space-between; align-items:center; gap:8px; flex-wrap:wrap;">
+            <div style="display:flex; gap:8px; flex-wrap:wrap; align-items:center;">
+              <a id="btn-download-video" href="#" download class="btn-primary" style="text-decoration:none; padding:6px 14px; font-size:0.80rem;">
+                ⬇️ Download MP4
+              </a>
+              <a id="btn-download-bundle-zip" href="#" class="btn-primary" style="display:none; text-decoration:none; padding:6px 14px; font-size:0.80rem; background:#059669;">
+                📦 Download ZIP Pack
+              </a>
+              <div id="extra-audio-downloads" style="display:flex; gap:6px; flex-wrap:wrap;"></div>
+              <div id="batch-tabs-bar" class="tab-pills" style="display:none;"></div>
+            </div>
+            <button type="button" class="btn-secondary" onclick="resetStudio()" title="Start fresh project">
+              🔄 Reset
             </button>
           </div>
-          <div id="wiki-fetch-status" style="display:none; font-size:0.74rem; margin-top:4px;"></div>
         </div>
 
-        <!-- Generation Language Mode (Hidden in UI because top banner controls it, kept for state compatibility) -->
-        <div class="form-group" style="display:none;">
-          <div class="tab-pills">
-            <button type="button" id="tab-lang-single" class="tab-btn active" onclick="switchLangMode('single')">Single Language</button>
-            <button type="button" id="tab-lang-multi" class="tab-btn" onclick="switchLangMode('multi')">🌐 Multiplier (Batch Mode)</button>
-          </div>
-        </div>
-
-        <!-- Single Language Selector (Shown in Single Language Studio) -->
-        <div id="group-single-lang" class="form-group">
-          <label for="select-lang">Target Story Language</label>
-          <select id="select-lang" onchange="onLanguageChange()">
-            <optgroup label="Tier 1 — High Viral Recaps">
-              <option value="es">Spanish (Español) — Resumen de Películas</option>
-              <option value="id">Indonesian (Bahasa) — Alur Cerita Film</option>
-              <option value="pt">Portuguese (Brasil) — Resumo de Filmes</option>
-              <option value="ur" selected>Urdu (اردو) — مکمل کہانی اور انجام</option>
-              <option value="hi">Hindi (हिन्दी) — मूवी एक्सप्लेनेशन</option>
-              <option value="en">English — Viral Movie Recap</option>
-            </optgroup>
-            <optgroup label="Tier 2 — High CPM Earnings">
-              <option value="ar">Arabic (العربية) — ملخص أفلام</option>
-              <option value="de">German (Deutsch) — Film Zusammenfassung</option>
-              <option value="fr">French (Français) — Résumé de Film</option>
-              <option value="ru">Russian (Русский) — Пересказ Фильма</option>
-              <option value="it">Italian (Italiano)</option>
-              <option value="tr">Turkish (Türkçe)</option>
-            </optgroup>
-            <optgroup label="Tier 3 — Fast-Growing Asian Markets">
-              <option value="vi">Vietnamese (Tiếng Việt)</option>
-              <option value="th">Thai (ไทย)</option>
-              <option value="ja">Japanese (日本語)</option>
-              <option value="ko">Korean (한국어)</option>
-            </optgroup>
-          </select>
-        </div>
-
-        <!-- Multi-Language Multiplier (Shown in Global Multiplier Studio) -->
-        <div id="group-multi-lang" class="form-group" style="display:none;">
-          <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:6px;">
-            <label style="margin:0; font-weight:700;">Global Languages Selection:</label>
-            <span id="batch-count-badge" class="pacing-badge">3 Selected</span>
-          </div>
-
-          <!-- 1-Click Viral Preset Chips -->
-          <div class="preset-chips-row">
-            <span style="font-size:0.70rem; color:var(--text-muted); font-weight:600;">Presets:</span>
-            <button type="button" class="preset-chip active" id="chip-preset-big3" onclick="applyLangPreset('viral_big3')">🔥 Viral Big-3 (EN, ES, UR)</button>
-            <button type="button" class="preset-chip" id="chip-preset-cpm" onclick="applyLangPreset('high_cpm')">💎 High CPM (EN, DE, FR, AR)</button>
-            <button type="button" class="preset-chip" id="chip-preset-asia" onclick="applyLangPreset('asian_growth')">🚀 Asian Growth (ID, HI, VN, TH)</button>
-            <button type="button" class="preset-chip" onclick="applyLangPreset('all')">⚡ All</button>
-            <button type="button" class="preset-chip" onclick="applyLangPreset('clear')">✕ Clear</button>
-          </div>
-
-          <div style="display:grid; grid-template-columns:1fr 1fr; gap:6px; background:rgba(0,0,0,0.3); padding:8px; border-radius:8px; border:1px solid var(--border-color);">
-            <label style="color:#fff; cursor:pointer;"><input type="checkbox" class="batch-lang-cb" value="en" checked onchange="onBatchLangChange()"> 🇺🇸 English</label>
-            <label style="color:#fff; cursor:pointer;"><input type="checkbox" class="batch-lang-cb" value="es" checked onchange="onBatchLangChange()"> 🇪🇸 Spanish</label>
-            <label style="color:#fff; cursor:pointer;"><input type="checkbox" class="batch-lang-cb" value="ur" checked onchange="onBatchLangChange()"> 🇵🇰 Urdu</label>
-            <label style="color:#fff; cursor:pointer;"><input type="checkbox" class="batch-lang-cb" value="id" onchange="onBatchLangChange()"> 🇮🇩 Indonesian</label>
-            <label style="color:#fff; cursor:pointer;"><input type="checkbox" class="batch-lang-cb" value="hi" onchange="onBatchLangChange()"> 🇮🇳 Hindi</label>
-            <label style="color:#fff; cursor:pointer;"><input type="checkbox" class="batch-lang-cb" value="ar" onchange="onBatchLangChange()"> 🇸🇦 Arabic</label>
-            <label style="color:#fff; cursor:pointer;"><input type="checkbox" class="batch-lang-cb" value="pt" onchange="onBatchLangChange()"> 🇧🇷 Portuguese</label>
-            <label style="color:#fff; cursor:pointer;"><input type="checkbox" class="batch-lang-cb" value="fr" onchange="onBatchLangChange()"> 🇫🇷 French</label>
-            <label style="color:#fff; cursor:pointer;"><input type="checkbox" class="batch-lang-cb" value="de" onchange="onBatchLangChange()"> 🇩🇪 German</label>
-            <label style="color:#fff; cursor:pointer;"><input type="checkbox" class="batch-lang-cb" value="ru" onchange="onBatchLangChange()"> 🇷🇺 Russian</label>
-            <label style="color:#fff; cursor:pointer;"><input type="checkbox" class="batch-lang-cb" value="vi" onchange="onBatchLangChange()"> 🇻🇳 Vietnamese</label>
-            <label style="color:#fff; cursor:pointer;"><input type="checkbox" class="batch-lang-cb" value="th" onchange="onBatchLangChange()"> 🇹🇭 Thai</label>
-          </div>
-        </div>
-
-        <!-- Advanced Creative Settings (Collapsible 1-Click Accordion) -->
-        <details class="advanced-settings-drawer" style="margin-top:2px; margin-bottom:12px; border:1px solid rgba(255,255,255,0.12); border-radius:8px; padding:10px 12px; background:rgba(255,255,255,0.02);">
-          <summary style="font-size:0.80rem; font-weight:600; color:var(--accent-cyan); cursor:pointer; user-select:none;">
-            <span>⚙️ Advanced Story Settings (Optional)</span>
-          </summary>
-          <div style="margin-top:10px; display:flex; flex-direction:column; gap:10px;">
-            <!-- Storytelling Tone / Persona -->
-            <div class="form-group" style="margin-bottom:0;">
-              <label for="select-persona">Narrative Tone & Persona</label>
-              <select id="select-persona">
-                <option value="auto" selected>✨ Auto-Detect Tone (AI Analyzes Genre & Mood)</option>
-                <option value="hollywood_trailer">🎬 Hollywood Trailer (Deep Suspense & Urgent Stakes)</option>
-                <option value="viral_fast">⚡ Viral Fast-Paced (Breathless TikTok/Reels Energy)</option>
-                <option value="sarcastic_roaster">🍿 Sarcastic Movie Roaster (Witty Commentary)</option>
-                <option value="documentary">🔍 Crime & Mystery Documentary (Dark & Analytical)</option>
-              </select>
+        <!-- 2. Viral 4K Thumbnails Showcase Strip -->
+        <div class="studio-card thumbnails-strip-card">
+          <div class="card-title-row">
+            <div class="card-title-badge">
+              <span style="font-size:1rem;">🖼️</span>
+              <h3>Viral 4K Thumbnails (Option 3)</h3>
             </div>
-
-            <!-- Spoiler Toggle -->
-            <div class="form-group" style="margin-bottom:0;">
-              <label for="select-spoiler">Ending / Spoiler Setting</label>
-              <select id="select-spoiler">
-                <option value="full_recap" selected>Reveal Complete Ending & Plot Climax (Full Recap)</option>
-                <option value="cliffhanger_teaser">Stop Before Final Twist (Cliffhanger to Watch Movie)</option>
-              </select>
-            </div>
-          </div>
-        </details>
-
-        <!-- Duration Selection -->
-        <div class="form-group">
-          <label for="select-duration">Target Explainer Duration</label>
-          <select id="select-duration" onchange="updateEstimatedWordCount()">
-            <option value="1">1 Minute — High-Velocity Short</option>
-            <option value="3" selected>3 Minutes — Viral Story Recap</option>
-            <option value="5">5 Minutes — Deep-Dive Recap</option>
-            <option value="10">10 Minutes — Full YouTube Episode</option>
-          </select>
-        </div>
-
-        <!-- Speech Velocity (Synchronizes Word Count, Voice Speed & Video Pacing) -->
-        <div class="form-group">
-          <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:4px;">
-            <label for="select-speed" style="margin:0; font-weight:600;">Speech Velocity (Pacing)</label>
-            <span id="target-words-badge" class="pacing-badge">~480 Words Target</span>
-          </div>
-          <select id="select-speed" onchange="updateEstimatedWordCount()">
-            <option value="normal">Normal Pace (+0% • ~135 WPM)</option>
-            <option value="fast" selected>Fast-Paced Cinematic (+15% • ~160 WPM)</option>
-            <option value="ultra_fast">Ultra-Fast High Energy (+20% • ~185 WPM)</option>
-          </select>
-        </div>
-
-        <div class="form-group">
-          <label for="input-notes">Plot Guide / Director Notes (Optional)</label>
-          <input type="text" id="input-notes" placeholder="e.g. Focus on the betrayal between Marcus and Elena...">
-        </div>
-
-        <button type="button" id="btn-gen-script" class="btn-primary" onclick="generateStoryScript()">
-          <span id="btn-gen-script-text">🧠 1. Generate Storyboard Script</span>
-        </button>
-
-        <button type="button" id="btn-run-autopilot" class="btn-primary" style="display:none; background:linear-gradient(135deg, #10b981, #059669); border-color:#34d399; margin-top:8px;" onclick="runAutopilotWorkflow()">
-          <span id="btn-run-autopilot-text">🚀 Run 1-Click Autopilot Explainer</span>
-        </button>
-      </div>
-
-      <!-- Column 2: Story Script & Virality Suite -->
-      <div class="studio-card">
-        <div class="card-header">
-          <div class="step-num">2</div>
-          <h2>Story Script & Retention Meter</h2>
-        </div>
-
-        <div class="hook-meter">
-          <span>Hook Retention Score:</span>
-          <span id="hook-score-badge" class="hook-badge">Awaiting Analysis...</span>
-        </div>
-
-        <!-- Multi-Script Deck Bar (Visible in Global Multiplier Studio) -->
-        <div id="multi-script-controls" style="display:none; margin-bottom:10px;">
-          <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:6px;">
-            <span style="font-size:0.78rem; font-weight:700; color:var(--accent-cyan);">🌐 Multi-Script Deck (Language Preview & Edit)</span>
-            <button type="button" id="btn-translate-all" class="btn-secondary" style="padding:3px 10px; font-size:0.74rem; background:rgba(6, 182, 212, 0.18); border-color:var(--accent-cyan); color:#38bdf8;" onclick="translateAllLanguageScripts()">
-              <span>🌐 Translate All Scripts</span>
+            <button type="button" id="btn-gen-instant-thumbs" class="btn-secondary" style="border-color:var(--accent-cyan); color:var(--accent-cyan); padding:3px 10px; font-size:0.74rem;" onclick="generateInstantThumbnails()">
+              ⚡ Generate 3 Thumbnails
             </button>
           </div>
-          <div id="multi-script-tabs-bar" class="multi-script-tabs">
-            <!-- Dynamic language tabs generated here -->
-          </div>
-        </div>
 
-        <div class="form-group">
-          <label>
-            <span id="script-area-label">Story Narration & Scene Timestamps</span>
-            <span id="script-stats" style="font-size:0.75rem; color:var(--text-muted);">0 Words</span>
-          </label>
-          <textarea id="script-area" class="script-area" placeholder="Click 'Generate Storyboard Script' or paste your custom story recap here..."></textarea>
-        </div>
-
-        <div style="display:flex; justify-content:space-between; gap:6px; flex-wrap:wrap;">
-          <button type="button" class="btn-secondary" onclick="clearScript()">Clear Script</button>
-          <button type="button" id="btn-expand-script" class="btn-secondary" style="border-color:#f59e0b; color:#fbbf24; font-size:0.75rem;" onclick="expandScript()">⚡ Expand to Full Length</button>
-          <button type="button" class="btn-secondary" onclick="recalculateHook()">Check Hook Score 🔥</button>
-        </div>
-
-        <!-- Instant Thumbnail Studio Section in Column 2 -->
-        <div style="margin-top:10px; padding-top:12px; border-top:1px solid var(--border-color); display:flex; flex-direction:column; gap:8px;">
-          <div style="display:flex; justify-content:space-between; align-items:center;">
-            <label style="font-weight:600; color:#fff; margin:0;">🖼️ Instant Thumbnails Studio (Option 3)</label>
-            <button type="button" id="btn-gen-instant-thumbs" class="btn-secondary" style="padding:4px 10px; font-size:0.75rem; background:rgba(99,102,241,0.2); border-color:var(--primary); color:#a5b4fc;" onclick="generateInstantThumbnails()">
-              <span>⚡ Generate 3 Thumbnails (2 Secs)</span>
-            </button>
-          </div>
-          <div id="col2-thumbnails-box" style="display:none; grid-template-columns:repeat(3, 1fr); gap:8px; margin-top:6px;">
-            <!-- Populated dynamically -->
-          </div>
-        </div>
-      </div>
-
-      <!-- Column 3: Voice, Music & Render -->
-      <div class="studio-card">
-        <div class="card-header">
-          <div class="step-num">3</div>
-          <h2>Studio Audio & Render</h2>
-        </div>
-
-        <!-- Mode A: AI Voices Settings (Single Language Studio - Primary) -->
-        <div id="box-voice-ai">
-          <div class="form-group">
-            <label for="select-voice">
-              <span>Narrator Voice</span>
-              <button type="button" class="btn-secondary" style="padding:2px 8px; font-size:0.75rem;" onclick="auditionVoice()">Preview Voice 🔊</button>
-            </label>
-            <select id="select-voice">
-              <!-- Dynamically populated based on selected language -->
-            </select>
-          </div>
-        </div>
-
-        <!-- Multi-Voice Casting Manager (Visible in Global Multiplier Studio) -->
-        <div id="multi-voice-casting-section" style="display:none; margin-bottom:12px;">
-          <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:6px;">
-            <label style="font-size:0.82rem; font-weight:700; color:#fff; margin:0;">👥 Multi-Voice Casting Manager</label>
-            <span style="font-size:0.72rem; color:var(--accent-cyan);">Audition Per Language</span>
-          </div>
-          <div id="multi-voice-casting-container" class="multi-voice-casting-grid">
-            <!-- Dynamic cards generated per checked language -->
-          </div>
-        </div>
-
-        <div class="form-group">
-          <label for="select-aspect">Video Aspect Ratio</label>
-          <select id="select-aspect">
-            <option value="vertical" selected>9:16 Vertical (TikTok, Reels, Shorts with Blur Backdrop)</option>
-            <option value="horizontal">16:9 Landscape (YouTube Full Video)</option>
-            <option value="square">1:1 Square (Facebook / Instagram Feed)</option>
-          </select>
-        </div>
-
-        <div class="form-group" style="flex-direction:row; align-items:center; gap:8px;">
-          <input type="checkbox" id="check-subs" checked style="width:auto;">
-          <label for="check-subs" style="margin:0; cursor:pointer;">Burn Dynamic High-Contrast Subtitles</label>
-        </div>
-
-        <!-- Advanced Studio Audio & Controls (Collapsible Accordion) -->
-        <details class="advanced-settings-drawer" style="margin-top:2px; margin-bottom:12px; border:1px solid rgba(255,255,255,0.12); border-radius:8px; padding:10px 12px; background:rgba(255,255,255,0.02);">
-          <summary style="font-size:0.80rem; font-weight:600; color:var(--accent-cyan); cursor:pointer; user-select:none;">
-            <span>⚙️ Advanced Studio Controls (Voice Clone, SFX, 1080p, Watermark)</span>
-          </summary>
-          <div style="margin-top:10px; display:flex; flex-direction:column; gap:10px;">
-            <!-- Voice Mode Selector Tabs (AI, Custom PC Audio, Voice Clone) -->
-            <div class="form-group" style="margin-bottom:0;">
-              <label>Voice Source Mode</label>
-              <div class="tab-pills">
-                <button type="button" id="tab-voice-ai" class="tab-btn active" onclick="switchVoiceMode('ai')">🎙️ AI Voices</button>
-                <button type="button" id="tab-voice-custom" class="tab-btn" onclick="switchVoiceMode('custom_audio')">📁 Custom Audio</button>
-                <button type="button" id="tab-voice-clone" class="tab-btn" onclick="switchVoiceMode('clone')">⚡ Voice Clone</button>
-              </div>
-            </div>
-
-            <!-- Mode B: Custom Audio Upload (.mp3 / .wav from PC) -->
-            <div id="box-voice-custom" class="form-group" style="display:none; margin-bottom:0; padding:10px; border-radius:8px; background:rgba(168, 85, 247, 0.1); border:1px dashed rgba(168, 85, 247, 0.4);">
-              <label style="font-size:0.80rem; color:#e9d5ff; font-weight:600; display:block; margin-bottom:6px;">
-                📁 Select Pre-recorded Voiceover (.mp3, .wav from PC)
-              </label>
-              <input type="file" id="input-custom-audio" accept="audio/mp3,audio/wav,audio/m4a,audio/*" onchange="onCustomAudioSelected(this)" style="font-size:0.78rem;">
-              <div id="custom-audio-info" style="display:none; margin-top:8px; font-size:0.76rem; color:#34d399; font-weight:600;">
-                ⏱️ Audio Duration: <span id="custom-audio-dur-text">0s</span> • Scenes will auto-sync!
-              </div>
-            </div>
-
-            <!-- Mode C: Voice Clone (30-60s Sample) -->
-            <div id="box-voice-clone" class="form-group" style="display:none; margin-bottom:0; padding:10px; border-radius:8px; background:rgba(56, 189, 248, 0.1); border:1px dashed rgba(56, 189, 248, 0.4);">
-              <label style="font-size:0.80rem; color:#bae6fd; font-weight:600; display:block; margin-bottom:6px;">
-                ⚡ Upload 20-60s Voice Clip (.mp3 / .wav)
-              </label>
-              <input type="file" id="input-clone-sample" accept="audio/*" onchange="onCloneSampleSelected(this)" style="font-size:0.78rem;">
-              <div style="display:flex; justify-content:space-between; align-items:center; margin-top:8px;">
-                <span id="clone-status-text" style="font-size:0.74rem; color:#94a3b8;">Captures resonance & pitch</span>
-                <button type="button" id="btn-preview-clone" class="btn-secondary" style="padding:3px 8px; font-size:0.72rem; color:#38bdf8; border-color:#38bdf8;" onclick="previewClonedVoice()">
-                  🎧 Preview Clone
-                </button>
-              </div>
-            </div>
-
-            <!-- Soundtrack Design & Audio Mode -->
-            <div class="form-group" style="margin-bottom:0;">
-              <label for="select-audio-mode">
-                <span>Soundtrack Design Mode</span>
-                <span style="font-size:0.72rem; color:#a5b4fc; font-weight:600;">Auto-SFX</span>
-              </label>
-              <select id="select-audio-mode" onchange="onAudioModeChange()">
-                <option value="hybrid" selected>🎵 + 💥 Hybrid (Music + Dynamic SFX Hits)</option>
-                <option value="sfx_only">💥 Pure SFX (No Music • 0% Copyright Risk • Halal Friendly)</option>
-                <option value="music_only">🎵 Music Only (Classic Mood Score)</option>
-              </select>
-            </div>
-
-            <div id="group-bgm" class="form-group" style="margin-bottom:0;">
-              <label for="select-bgm">
-                <span>Royalty-Free Mood Score</span>
-                <span id="bgm-status-hint" style="font-size:0.72rem; color:var(--text-muted);">Ducked under voiceover</span>
-              </label>
-              <select id="select-bgm">
-                <option value="auto" selected>✨ Auto-Match Mood (AI Selects Emotion Track)</option>
-                <option value="suspense">Dark Suspense & Mystery (Violins / Drones)</option>
-                <option value="tense">Intense Action & Horror (Heavy Beats)</option>
-                <option value="emotional">Emotional Drama & Melancholy (Piano)</option>
-                <option value="upbeat">Upbeat & Quirky (Lofi / Fast)</option>
-              </select>
-            </div>
-
-            <div class="form-group" style="margin-bottom:0;">
-              <label for="select-resolution">
-                <span>Video Resolution & Speed</span>
-                <span style="font-size:0.72rem; color:#10b981; font-weight:600;">⚡ 3x Fast</span>
-              </label>
-              <select id="select-resolution">
-                <option value="720p" selected>⚡ 720p HD (Recommended: 3x Faster & Anti-Throttle)</option>
-                <option value="1080p">🎬 1080p Full HD (Larger file download)</option>
-              </select>
-            </div>
-
-            <div class="form-group" style="margin-bottom:0;">
-              <label for="input-watermark">Channel Watermark (Optional)</label>
-              <input type="text" id="input-watermark" placeholder="@MyCinemaRecaps">
-            </div>
-          </div>
-        </details>
-
-        <!-- Export Mode Selector (Visible in Global Multiplier Studio) -->
-        <div id="export-mode-controls" class="form-group" style="display:none; background:rgba(255,255,255,0.03); padding:10px; border-radius:8px; border:1px solid rgba(255,255,255,0.08);">
-          <label style="font-weight:700; color:var(--accent-cyan); display:flex; justify-content:space-between;">
-            <span>🌐 Export Architecture</span>
-            <span style="font-size:0.72rem; color:var(--text-muted);">YouTube Native</span>
-          </label>
-          <div style="display:flex; flex-direction:column; gap:8px; margin-top:6px;">
-            <label style="display:flex; align-items:flex-start; gap:8px; font-size:0.82rem; cursor:pointer;">
-              <input type="radio" name="export-mode" id="export-mode-audio-pack" value="youtube_audio_pack" checked style="width:auto; margin-top:3px;">
-              <div>
-                <strong style="color:#38bdf8;">YouTube Multi-Audio Pack (Recommended)</strong>
-                <div style="font-size:0.72rem; color:var(--text-muted);">1 Master Video + Synced Dubs (.mp3) + .SRT Subtitles (80% faster render, single global video)</div>
-              </div>
-            </label>
-            <label style="display:flex; align-items:flex-start; gap:8px; font-size:0.82rem; cursor:pointer;">
-              <input type="radio" name="export-mode" id="export-mode-independent" value="independent_videos" style="width:auto; margin-top:3px;">
-              <div>
-                <strong style="color:#e2e8f0;">Separate Channel MP4s</strong>
-                <div style="font-size:0.72rem; color:var(--text-muted);">Full independent video file per language (For creators with multiple dedicated channels)</div>
-              </div>
-            </label>
-          </div>
-        </div>
-
-        <button type="button" id="btn-render-video" class="btn-primary" style="margin-top:auto;" onclick="renderExplainerVideo()">
-          <span id="btn-render-text">🚀 2. Render Explainer & Thumbnails</span>
-        </button>
-      </div>
-
-    </div>
-
-    <!-- Autopilot Countdown Pause Card -->
-    <div id="autopilot-countdown-card" class="studio-card" style="display:none; margin-top:1.5rem; background:linear-gradient(135deg, rgba(16, 185, 129, 0.12), rgba(15, 23, 42, 0.95)); border:1px solid rgba(16, 185, 129, 0.4); text-align:center; padding:18px;">
-      <h3 style="font-size:1.1rem; color:#34d399; margin:0 0 6px 0;">🎉 Script, Hooks & SEO Ready!</h3>
-      <p id="countdown-timer-msg" style="font-size:0.85rem; color:#cbd5e1; margin-bottom:12px;">
-        Starting video render in <span id="countdown-seconds" style="font-weight:800; font-size:1.25rem; color:#f59e0b;">5</span> seconds...
-      </p>
-      <div style="display:flex; justify-content:center; gap:12px; flex-wrap:wrap;">
-        <button type="button" class="btn-primary" style="padding:6px 18px; font-size:0.82rem; background:linear-gradient(135deg, #10b981, #059669); border-color:#34d399;" onclick="proceedAutopilotRenderNow()">
-          ⚡ Proceed Now (Skip Wait)
-        </button>
-        <button type="button" class="btn-secondary" style="padding:6px 14px; font-size:0.82rem; border-color:#f87171; color:#f87171;" onclick="pauseAutopilotRender()">
-          ⏸️ Pause Auto-Render (Edit Script)
-        </button>
-      </div>
-    </div>
-
-    <!-- Live Animated Progress Stepper -->
-    <div id="render-progress-card" class="studio-card" style="display:none; margin-top:1.5rem; border-color:var(--primary); background:rgba(16, 24, 40, 0.95);">
-      <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
-        <span id="progress-step-text" style="font-weight:600; color:var(--accent-cyan);">🎬 Ingesting video & analyzing timeline highlights…</span>
-        <span id="progress-pct" style="font-weight:700; color:#fff;">15%</span>
-      </div>
-      <div style="width:100%; height:8px; background:rgba(255,255,255,0.1); border-radius:4px; overflow:hidden;">
-        <div id="progress-bar-fill" style="width:15%; height:100%; background:linear-gradient(90deg, var(--primary), var(--accent-cyan)); transition:width 0.4s ease;"></div>
-      </div>
-    </div>
-
-    <!-- Output Results Hub -->
-    <div id="results-hub" class="results-container">
-      <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:1.25rem; flex-wrap:wrap; gap:10px;">
-        <h2 style="font-size:1.4rem;">🎉 Explainer Export Hub Ready!</h2>
-        <div style="display:flex; align-items:center; gap:10px; flex-wrap:wrap;">
-          <!-- Multi-Language Batch Tabs Bar (Shown when multiple languages generated) -->
-          <div id="batch-tabs-bar" class="tab-pills" style="display:none;"></div>
-          <!-- 1-Click Master ZIP Export Button -->
-          <a id="btn-download-bundle-zip" href="#" class="btn-primary" style="display:none; text-decoration:none; padding:8px 16px; font-size:0.85rem; background:linear-gradient(135deg, #10b981, #059669); border-color:#34d399;">
-            <span>📦 Download Complete Global Pack (.zip)</span>
-          </a>
-        </div>
-      </div>
-      <div class="results-grid">
-
-        <!-- Left: Video Player -->
-        <div style="display:flex; flex-direction:column; gap:12px;">
-          <h3>🎬 Final Rendered Video</h3>
-          <video id="result-player" controls style="width:100%; border-radius:12px; background:#000; max-height:480px;"></video>
-          <a id="btn-download-video" href="#" download class="btn-primary" style="text-decoration:none;">
-            <span>⬇️ Download Full Explainer Video</span>
-          </a>
-          <button type="button" class="btn-secondary" style="border-color:var(--accent-cyan); color:var(--accent-cyan); width:100%;" onclick="resetStudio()">
-            <span>🔄 Start New Project / Reset Studio</span>
-          </button>
-        </div>
-
-        <!-- Right: 3 Thumbnails & Metadata -->
-        <div style="display:flex; flex-direction:column; gap:16px;">
-          <h3>🖼️ 3 High-CTR YouTube Thumbnails (Option 3)</h3>
+          <!-- 3 Generated Thumbnails Container (Horizontal Strip with Hover Zoom) -->
           <div id="thumbnails-container" class="thumbnail-cards">
-            <!-- Populated dynamically -->
+            <!-- Dynamically populated with 3 cards -->
           </div>
 
-          <h3 style="margin-top:12px;">🏷️ Click-to-Copy YouTube & TikTok SEO Suite</h3>
+          <!-- Hidden compatibility container for col2 -->
+          <div id="col2-thumbnails-box" style="display:none;"></div>
+        </div>
+
+        <!-- 3. One-Click Social Metadata Drawer (Chips) -->
+        <div class="studio-card metadata-drawer-card">
+          <div class="card-title-row">
+            <div class="card-title-badge">
+              <span style="font-size:1rem;">🏷️</span>
+              <h3>One-Click Social Metadata Suite (Click to Copy)</h3>
+            </div>
+          </div>
+
           <div style="display:flex; flex-direction:column; gap:8px;">
-            <input type="text" id="meta-title-1" readonly onclick="copyText(this)">
-            <textarea id="meta-desc" rows="4" readonly onclick="copyText(this)"></textarea>
-            <input type="text" id="meta-tags" readonly onclick="copyText(this)">
-            <input type="text" id="meta-comment" readonly onclick="copyText(this)">
-          </div>
-        </div>
+            <!-- Title Chip -->
+            <div class="meta-field-group">
+              <label>Viral Title</label>
+              <input type="text" id="meta-title-1" class="meta-chip" readonly onclick="copyText(this)" placeholder="Generated YouTube title appears here...">
+            </div>
 
-      </div>
+            <!-- Description Chip -->
+            <div class="meta-field-group">
+              <label>SEO Description & Timestamps</label>
+              <textarea id="meta-desc" rows="3" class="meta-chip" readonly onclick="copyText(this)" placeholder="Generated description & Fair Use disclaimer..."></textarea>
+            </div>
 
-      <!-- 🚀 1-Click YouTube Auto-Scheduler Card -->
-      <div class="studio-card" style="margin-top:1.5rem; background:linear-gradient(180deg, rgba(239, 68, 68, 0.06) 0%, rgba(15, 23, 42, 0.6) 100%); border:1px solid rgba(239, 68, 68, 0.35);">
-        <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:10px; margin-bottom:12px;">
-          <div style="display:flex; align-items:center; gap:8px;">
-            <span style="font-size:1.3rem;">📅</span>
-            <h3 style="font-size:1.1rem; font-weight:700; color:#f8fafc; margin:0;">1-Click YouTube Auto-Scheduler</h3>
-          </div>
-          <span style="font-size:0.75rem; background:rgba(239, 68, 68, 0.2); color:#fca5a5; padding:4px 10px; border-radius:12px; font-weight:600; border:1px solid rgba(239, 68, 68, 0.3);">
-            Official Google OAuth 2.0 • 0% Ban Risk
-          </span>
-        </div>
-        <p style="font-size:0.83rem; color:#94a3b8; margin-bottom:14px;">
-          Automatically upload this video in 5MB resumable chunks, attach the custom thumbnail, embed timed subtitles (.srt), and schedule it for peak engagement hours without touching YouTube Studio.
-        </p>
+            <!-- Ranked Tags Chip -->
+            <div class="meta-field-group">
+              <label>Ranked SEO Tags</label>
+              <input type="text" id="meta-tags" class="meta-chip" readonly onclick="copyText(this)" placeholder="SEO tags...">
+            </div>
 
-        <div style="display:grid; grid-template-columns:repeat(auto-fit, minmax(240px, 1fr)); gap:14px; margin-bottom:14px;">
-          <div>
-            <label style="font-size:0.80rem; color:#cbd5e1; display:block; margin-bottom:4px; font-weight:600;">Target YouTube Channel</label>
-            <select id="yt-sched-channel" style="width:100%; padding:8px 10px; background:#0f172a; border:1px solid rgba(255,255,255,0.15); border-radius:6px; color:#fff; font-size:0.85rem;">
-              <option value="">(No channel connected - Click 📺 YouTube in header)</option>
-            </select>
-          </div>
-
-          <div>
-            <label style="font-size:0.80rem; color:#cbd5e1; display:block; margin-bottom:4px; font-weight:600;">Schedule Date & Time</label>
-            <input type="datetime-local" id="yt-sched-datetime" style="width:100%; padding:7px 10px; background:#0f172a; border:1px solid rgba(255,255,255,0.15); border-radius:6px; color:#fff; font-size:0.85rem;">
-          </div>
-        </div>
-
-        <!-- Peak Time Quick Presets -->
-        <div style="margin-bottom:16px;">
-          <div style="font-size:0.76rem; color:#94a3b8; margin-bottom:6px; font-weight:600;">⚡ Quick Peak Hour Presets:</div>
-          <div style="display:flex; gap:8px; flex-wrap:wrap;">
-            <button type="button" class="btn-secondary" style="font-size:0.75rem; padding:4px 10px;" onclick="setSchedulePreset('today_peak')">🌆 Today Peak (7:00 PM)</button>
-            <button type="button" class="btn-secondary" style="font-size:0.75rem; padding:4px 10px;" onclick="setSchedulePreset('tomorrow_peak')">🌅 Tomorrow Peak (7:00 PM)</button>
-            <button type="button" class="btn-secondary" style="font-size:0.75rem; padding:4px 10px;" onclick="setSchedulePreset('weekend')">🎉 Weekend Special (11:00 AM)</button>
-          </div>
-        </div>
-
-        <!-- Action Button & Status Bar -->
-        <div style="display:flex; align-items:center; gap:14px; flex-wrap:wrap;">
-          <button type="button" id="btn-yt-schedule" class="btn-primary" style="background:linear-gradient(135deg, #ef4444, #dc2626); border-color:#f87171; padding:10px 20px;" onclick="scheduleCurrentVideoToYouTube()">
-            <span>🚀 Schedule Video & Assets to YouTube</span>
-          </button>
-          <div id="yt-sched-status" style="display:none; flex:1; min-width:260px; font-size:0.82rem; padding:8px 12px; border-radius:6px; background:rgba(255,255,255,0.05); color:#cbd5e1;">
-            <div id="yt-sched-status-msg" style="margin-bottom:4px;">Preparing upload...</div>
-            <div style="height:6px; background:rgba(255,255,255,0.1); border-radius:3px; overflow:hidden;">
-              <div id="yt-sched-progress-bar" style="width:0%; height:100%; background:#ef4444; transition:width 0.3s ease;"></div>
+            <!-- Pinned Comment Chip -->
+            <div class="meta-field-group">
+              <label>Engagement Pinned Comment</label>
+              <input type="text" id="meta-comment" class="meta-chip" readonly onclick="copyText(this)" placeholder="Pinned engagement question...">
             </div>
           </div>
         </div>
-      </div>
-    </div>
 
-    <!-- Live Engine Logs & Diagnostics Terminal -->
-    <div id="logs-console-card" class="studio-card" style="margin-top:2rem; background:#070a12; border-color:rgba(255,255,255,0.12);">
-      <div style="display:flex; justify-content:space-between; align-items:center; border-bottom:1px solid rgba(255,255,255,0.08); padding-bottom:8px;">
-        <div style="display:flex; align-items:center; gap:8px;">
-          <span style="display:inline-block; width:8px; height:8px; border-radius:50%; background:#10b981; box-shadow:0 0 8px #10b981;"></span>
-          <h3 style="font-size:0.92rem; font-weight:600; color:#cbd5e1;">🖥️ Live Engine Logs & Diagnostics Console</h3>
+        <!-- 4. BOTTOM ACTION BUTTON: Full-width Emerald Green [ RENDER FINAL EXPLAINER VIDEO ] -->
+        <button type="button" id="btn-render-video" class="btn-render-hero" onclick="renderExplainerVideo()">
+          <span id="btn-render-text">🚀 RENDER FINAL EXPLAINER VIDEO</span>
+        </button>
+
+        <!-- Autopilot Countdown Pause Card -->
+        <div id="autopilot-countdown-card" class="studio-card" style="display:none; background:rgba(16, 185, 129, 0.08); border-color:var(--accent-emerald); text-align:center; padding:16px;">
+          <h3 style="font-size:1rem; color:#34d399; margin-bottom:4px;">🎉 Script, Hooks & SEO Ready!</h3>
+          <p id="countdown-timer-msg" style="font-size:0.82rem; color:#cbd5e1; margin-bottom:10px;">
+            Starting render in <span id="countdown-seconds" style="font-weight:800; font-size:1.2rem; color:#f59e0b;">5</span> seconds...
+          </p>
+          <div style="display:flex; justify-content:center; gap:8px;">
+            <button type="button" class="btn-primary" style="padding:4px 14px; font-size:0.78rem; background:var(--accent-emerald); color:#000;" onclick="proceedAutopilotRenderNow()">
+              ⚡ Proceed Now
+            </button>
+            <button type="button" class="btn-secondary" style="padding:4px 12px; font-size:0.78rem; border-color:#f87171; color:#f87171;" onclick="pauseAutopilotRender()">
+              ⏸️ Pause & Edit
+            </button>
+          </div>
         </div>
-        <div style="display:flex; gap:8px;">
-          <button type="button" class="btn-secondary" style="font-size:0.72rem; padding:3px 8px;" onclick="clearLiveLogs()">Clear Logs</button>
+
+        <!-- Live Animated Progress Stepper -->
+        <div id="render-progress-card" class="studio-card" style="display:none; border-color:var(--accent-cyan); background:rgba(18, 20, 24, 0.95);">
+          <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:6px;">
+            <span id="progress-step-text" style="font-weight:600; font-size:0.82rem; color:var(--accent-cyan);">🎬 Ingesting video & analyzing timeline highlights…</span>
+            <span id="progress-pct" style="font-weight:700; font-size:0.85rem; color:#fff;">15%</span>
+          </div>
+          <div style="width:100%; height:6px; background:rgba(255,255,255,0.08); border-radius:3px; overflow:hidden;">
+            <div id="progress-bar-fill" style="width:15%; height:100%; background:linear-gradient(90deg, var(--accent-emerald), var(--accent-cyan)); transition:width 0.4s ease;"></div>
+          </div>
         </div>
+
+        <!-- Results Hub Container (Wrapper for state management) -->
+        <div id="results-hub" style="display:none;"></div>
+
+        <!-- 5. 1-Click YouTube Auto-Scheduler Card -->
+        <div class="studio-card" style="background:rgba(239, 68, 68, 0.04); border-color:rgba(239, 68, 68, 0.25);">
+          <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:8px;">
+            <div style="display:flex; align-items:center; gap:6px;">
+              <span style="font-size:1.1rem;">📅</span>
+              <h3 style="font-size:0.92rem; font-weight:700; color:#fff;">1-Click YouTube Auto-Scheduler</h3>
+            </div>
+            <span style="font-size:0.70rem; background:rgba(239,68,68,0.15); color:#fca5a5; padding:2px 8px; border-radius:10px;">OAuth 2.0</span>
+          </div>
+
+          <div style="display:grid; grid-template-columns:1fr 1fr; gap:8px;">
+            <div>
+              <label style="font-size:0.74rem;">Target YouTube Channel</label>
+              <select id="yt-sched-channel">
+                <option value="">(No channel connected - Click 📺 in header)</option>
+              </select>
+            </div>
+            <div>
+              <label style="font-size:0.74rem;">Schedule Date & Time</label>
+              <input type="datetime-local" id="yt-sched-datetime">
+            </div>
+          </div>
+
+          <div style="display:flex; gap:6px; flex-wrap:wrap;">
+            <button type="button" class="btn-secondary" style="font-size:0.72rem; padding:3px 8px;" onclick="setSchedulePreset('today_peak')">🌆 Today (7 PM)</button>
+            <button type="button" class="btn-secondary" style="font-size:0.72rem; padding:3px 8px;" onclick="setSchedulePreset('tomorrow_peak')">🌅 Tomorrow (7 PM)</button>
+            <button type="button" class="btn-secondary" style="font-size:0.72rem; padding:3px 8px;" onclick="setSchedulePreset('weekend')">🎉 Weekend (11 AM)</button>
+          </div>
+
+          <div style="display:flex; align-items:center; gap:10px; flex-wrap:wrap;">
+            <button type="button" id="btn-yt-schedule" class="btn-primary" style="background:#dc2626; border-color:#f87171; padding:8px 14px; font-size:0.80rem;" onclick="scheduleCurrentVideoToYouTube()">
+              🚀 Schedule to YouTube
+            </button>
+            <div id="yt-sched-status" style="display:none; flex:1; min-width:200px; font-size:0.76rem; padding:6px 10px; border-radius:6px; background:rgba(255,255,255,0.04); color:#cbd5e1;">
+              <div id="yt-sched-status-msg" style="margin-bottom:3px;">Preparing upload...</div>
+              <div style="height:4px; background:rgba(255,255,255,0.1); border-radius:2px; overflow:hidden;">
+                <div id="yt-sched-progress-bar" style="width:0%; height:100%; background:#ef4444; transition:width 0.3s ease;"></div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- 6. Live Engine Logs & Diagnostics Console -->
+        <div id="logs-console-card" class="studio-card">
+          <div style="display:flex; justify-content:space-between; align-items:center; border-bottom:1px solid var(--border-subtle); padding-bottom:6px;">
+            <div style="display:flex; align-items:center; gap:6px;">
+              <span style="width:7px; height:7px; border-radius:50%; background:#10b981;"></span>
+              <h3 style="font-size:0.82rem; font-weight:600; color:#cbd5e1;">Live Diagnostics & FFmpeg Console</h3>
+            </div>
+            <button type="button" class="btn-secondary" style="font-size:0.70rem; padding:2px 6px;" onclick="clearLiveLogs()">Clear</button>
+          </div>
+          <div id="live-logs-terminal" class="live-logs-terminal">
+            <div style="color:#64748b;">[System Ready] Engine initialized. Creator Split Hub active...</div>
+          </div>
+        </div>
+
       </div>
-      <div id="live-logs-terminal" style="font-family:'Courier New', monospace; font-size:0.80rem; height:140px; overflow-y:auto; line-height:1.6; color:#94a3b8; background:rgba(0,0,0,0.5); border-radius:6px; padding:10px;">
-        <div style="color:#64748b;">[System Ready] Engine initialized. Awaiting user commands...</div>
-      </div>
+
     </div>
 
   </main>
 
   <!-- ⚙️ 9Router AI Settings Modal -->
-  <div id="modal-ai-settings" style="display:none; position:fixed; inset:0; background:rgba(0,0,0,0.75); z-index:9999; align-items:center; justify-content:center; backdrop-filter:blur(4px);">
-    <div style="background:#0f172a; border:1px solid rgba(255,255,255,0.15); border-radius:12px; width:90%; max-width:480px; padding:24px; box-shadow:0 20px 25px -5px rgba(0, 0, 0, 0.5);">
-      <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:16px;">
-        <h3 style="font-size:1.1rem; color:#fff; font-weight:700; margin:0;">⚙️ 9Router AI LLM Settings</h3>
-        <button type="button" class="btn-secondary" style="padding:2px 8px; font-size:1rem;" onclick="closeAiSettingsModal()">✕</button>
+  <div id="modal-ai-settings" style="display:none; position:fixed; inset:0; background:rgba(0,0,0,0.8); z-index:9999; align-items:center; justify-content:center; backdrop-filter:blur(6px);">
+    <div style="background:#181A20; border:1px solid var(--border-subtle); border-radius:var(--radius-card); width:90%; max-width:480px; padding:20px; box-shadow:0 25px 50px rgba(0, 0, 0, 0.6);">
+      <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:14px;">
+        <h3 style="font-size:1rem; color:#fff; font-weight:700; margin:0;">⚙️ 9Router AI LLM Settings</h3>
+        <button type="button" class="btn-secondary" style="padding:2px 8px; font-size:0.85rem;" onclick="closeAiSettingsModal()">✕</button>
       </div>
 
-      <div style="display:flex; flex-direction:column; gap:12px;">
+      <div style="display:flex; flex-direction:column; gap:10px;">
         <div>
-          <label style="font-size:0.80rem; color:#94a3b8; display:block; margin-bottom:4px;">9Router Endpoint URL</label>
-          <input type="text" id="ai-modal-url" value="http://127.0.0.1:20128/v1" style="width:100%; font-size:0.85rem;">
+          <label style="font-size:0.78rem; color:#94a3b8; display:block; margin-bottom:4px;">9Router Endpoint URL</label>
+          <input type="text" id="ai-modal-url" value="http://127.0.0.1:20128/v1" style="width:100%; font-size:0.82rem;">
         </div>
 
         <div>
-          <label style="font-size:0.80rem; color:#94a3b8; display:block; margin-bottom:4px;">Active Combo Model</label>
-          <input type="text" id="ai-modal-combo" value="new-combo" style="width:100%; font-size:0.85rem;">
+          <label style="font-size:0.78rem; color:#94a3b8; display:block; margin-bottom:4px;">Active Combo Model</label>
+          <input type="text" id="ai-modal-combo" value="new-combo" style="width:100%; font-size:0.82rem;">
         </div>
 
         <div>
-          <label style="font-size:0.80rem; color:#94a3b8; display:block; margin-bottom:4px;">API Key (Optional)</label>
-          <input type="password" id="ai-modal-key" placeholder="sk-..." style="width:100%; font-size:0.85rem;">
+          <label style="font-size:0.78rem; color:#94a3b8; display:block; margin-bottom:4px;">API Key (Optional)</label>
+          <input type="password" id="ai-modal-key" placeholder="sk-..." style="width:100%; font-size:0.82rem;">
         </div>
 
-        <div id="ai-modal-feedback" style="padding:8px 12px; border-radius:6px; font-size:0.80rem; background:rgba(255,255,255,0.05); color:#cbd5e1;">
+        <div id="ai-modal-feedback" style="padding:6px 10px; border-radius:6px; font-size:0.76rem; background:rgba(255,255,255,0.04); color:#cbd5e1;">
           Status: Ready to test connection.
         </div>
 
-        <div style="display:flex; justify-content:flex-end; gap:8px; margin-top:8px;">
-          <button type="button" class="btn-secondary" onclick="testAiConnectionModal()">⚡ Test Connection</button>
+        <div style="display:flex; justify-content:flex-end; gap:6px; margin-top:6px;">
+          <button type="button" class="btn-secondary" onclick="testAiConnectionModal()">⚡ Test</button>
           <button type="button" class="btn-primary" onclick="saveAiSettingsModal()">💾 Save & Apply</button>
         </div>
       </div>
     </div>
+  </div>
+
   <!-- 📺 YouTube Channel Manager Modal -->
-  <div id="modal-youtube" style="display:none; position:fixed; inset:0; background:rgba(0,0,0,0.75); z-index:9999; align-items:center; justify-content:center; backdrop-filter:blur(4px);">
-    <div style="background:#0f172a; border:1px solid rgba(255,255,255,0.15); border-radius:12px; width:90%; max-width:540px; padding:24px; box-shadow:0 20px 25px -5px rgba(0, 0, 0, 0.5); max-height:90vh; overflow-y:auto;">
-      <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:16px;">
+  <div id="modal-youtube" style="display:none; position:fixed; inset:0; background:rgba(0,0,0,0.8); z-index:9999; align-items:center; justify-content:center; backdrop-filter:blur(6px);">
+    <div style="background:#181A20; border:1px solid var(--border-subtle); border-radius:var(--radius-card); width:90%; max-width:520px; padding:20px; box-shadow:0 25px 50px rgba(0, 0, 0, 0.6); max-height:90vh; overflow-y:auto;">
+      <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:14px;">
         <div style="display:flex; align-items:center; gap:8px;">
-          <span style="font-size:1.3rem;">📺</span>
-          <h3 style="font-size:1.1rem; color:#fff; font-weight:700; margin:0;">YouTube Channels & Scheduling Hub</h3>
+          <span style="font-size:1.2rem;">📺</span>
+          <h3 style="font-size:1rem; color:#fff; font-weight:700; margin:0;">YouTube Channels Hub</h3>
         </div>
-        <button type="button" class="btn-secondary" style="padding:2px 8px; font-size:1rem;" onclick="closeYouTubeModal()">✕</button>
+        <button type="button" class="btn-secondary" style="padding:2px 8px; font-size:0.85rem;" onclick="closeYouTubeModal()">✕</button>
       </div>
 
       <!-- Section 1: Google Cloud Client Credentials -->
-      <div style="background:rgba(255,255,255,0.03); border:1px solid rgba(255,255,255,0.08); border-radius:8px; padding:14px; margin-bottom:16px;">
-        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
-          <label style="font-size:0.85rem; font-weight:600; color:#f8fafc;">🔑 Google Cloud OAuth Credentials</label>
-          <span id="yt-creds-badge" style="font-size:0.72rem; padding:2px 8px; border-radius:4px; background:rgba(239,68,68,0.2); color:#fca5a5;">Not Configured</span>
+      <div style="background:rgba(255,255,255,0.02); border:1px solid var(--border-subtle); border-radius:8px; padding:12px; margin-bottom:12px;">
+        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:6px;">
+          <label style="font-size:0.82rem; font-weight:600; color:#f8fafc;">🔑 OAuth Credentials</label>
+          <span id="yt-creds-badge" style="font-size:0.70rem; padding:2px 6px; border-radius:4px; background:rgba(239,68,68,0.15); color:#fca5a5;">Not Configured</span>
         </div>
-        <p style="font-size:0.76rem; color:#94a3b8; margin-bottom:10px;">
-          Enter your free Google Cloud OAuth Client ID & Secret for YouTube Data API v3.
-        </p>
-        <div style="display:flex; flex-direction:column; gap:8px;">
-          <input type="text" id="yt-modal-client-id" placeholder="Google Client ID (e.g. 123...apps.googleusercontent.com)" style="width:100%; font-size:0.80rem; padding:6px 10px; background:#1e293b; border:1px solid rgba(255,255,255,0.15); border-radius:6px; color:#fff;">
-          <input type="password" id="yt-modal-client-secret" placeholder="Google Client Secret (e.g. GOCSPX-...)" style="width:100%; font-size:0.80rem; padding:6px 10px; background:#1e293b; border:1px solid rgba(255,255,255,0.15); border-radius:6px; color:#fff;">
-          <div style="display:flex; justify-content:space-between; align-items:center; margin-top:4px;">
-            <div id="yt-creds-msg" style="font-size:0.75rem; color:#94a3b8;"></div>
-            <button type="button" class="btn-secondary" style="font-size:0.78rem; padding:5px 12px;" onclick="saveYouTubeCredentials()">💾 Save API Keys</button>
+        <div style="display:flex; flex-direction:column; gap:6px;">
+          <input type="text" id="yt-modal-client-id" placeholder="Google Client ID" style="width:100%; font-size:0.78rem;">
+          <input type="password" id="yt-modal-client-secret" placeholder="Google Client Secret" style="width:100%; font-size:0.78rem;">
+          <div style="display:flex; justify-content:space-between; align-items:center; margin-top:2px;">
+            <div id="yt-creds-msg" style="font-size:0.72rem; color:#94a3b8;"></div>
+            <button type="button" class="btn-secondary" style="font-size:0.74rem; padding:4px 10px;" onclick="saveYouTubeCredentials()">💾 Save</button>
           </div>
         </div>
       </div>
 
       <!-- Section 2: Connect New Channel -->
-      <div style="background:rgba(239, 68, 68, 0.05); border:1px solid rgba(239, 68, 68, 0.25); border-radius:8px; padding:14px; margin-bottom:16px; text-align:center;">
-        <h4 style="font-size:0.90rem; color:#fca5a5; margin:0 0 6px 0;">🔗 Connect YouTube Channel (OAuth 2.0)</h4>
-        <p style="font-size:0.78rem; color:#94a3b8; margin-bottom:12px;">
-          Click below to authenticate with Google. 100% official OAuth — zero password exposure.
-        </p>
-        <button type="button" id="btn-yt-connect" class="btn-primary" style="background:linear-gradient(135deg, #ef4444, #dc2626); border-color:#f87171; padding:8px 18px; font-size:0.85rem;" onclick="connectYouTubeChannel()">
-          <span>➕ Add / Connect YouTube Channel</span>
+      <div style="background:rgba(239, 68, 68, 0.04); border:1px solid rgba(239, 68, 68, 0.2); border-radius:8px; padding:12px; margin-bottom:12px; text-align:center;">
+        <button type="button" id="btn-yt-connect" class="btn-primary" style="background:#dc2626; border-color:#f87171; padding:6px 14px; font-size:0.80rem;" onclick="connectYouTubeChannel()">
+          <span>➕ Connect YouTube Channel (OAuth 2.0)</span>
         </button>
       </div>
 
       <!-- Section 3: Connected Channels List -->
       <div>
-        <h4 style="font-size:0.88rem; color:#cbd5e1; margin:0 0 10px 0;">Connected Channels (<span id="yt-modal-ch-count">0</span>)</h4>
-        <div id="yt-connected-channels-list" style="display:flex; flex-direction:column; gap:8px;">
-          <!-- Populated dynamically -->
-        </div>
+        <h4 style="font-size:0.82rem; color:#cbd5e1; margin:0 0 8px 0;">Connected Channels (<span id="yt-modal-ch-count">0</span>)</h4>
+        <div id="yt-connected-channels-list" style="display:flex; flex-direction:column; gap:6px;"></div>
       </div>
     </div>
   </div>

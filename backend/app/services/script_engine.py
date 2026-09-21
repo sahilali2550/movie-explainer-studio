@@ -564,6 +564,7 @@ class ScriptEngine:
                 line = re.sub(r'^\d+[\.\)]\s*', '', line)
                 line = re.sub(r'\[.*?\]', '', line)
                 line = re.sub(r'\*+', '', line)
+                line = re.sub(r'^(?:voiceover|narration)\s*:\s*', '', line, flags=re.IGNORECASE)
                 if len(line) > 3:
                     lines.append(line)
             cleaned = ' '.join(lines)
@@ -799,7 +800,9 @@ class ScriptEngine:
                     for i, b in enumerate(blocks):
                         s_t, e_t = block_boundaries[i]
                         b.narration_start = round(curr_t, 3)
-                        e_t = max(curr_t + 1.0, e_t)
+                        remaining_blocks = len(blocks) - 1 - i
+                        max_e_t = max(curr_t + 1.0, total_speech_dur - remaining_blocks * 1.0)
+                        e_t = max(curr_t + 1.0, min(e_t, max_e_t))
                         if i == len(blocks) - 1:
                             e_t = max(e_t, total_speech_dur)
                         b.narration_end = round(e_t, 3)

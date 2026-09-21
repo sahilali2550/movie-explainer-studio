@@ -978,9 +978,9 @@ class VideoEngine:
 
         try:
             for idx, block in enumerate(scene_blocks):
-                narration_dur = round(block.narration_end - block.narration_start, 3)
+                narration_dur = round(getattr(block, "speech_dur", 0.0) or (block.narration_end - block.narration_start), 3)
                 if narration_dur <= 0.0:
-                    narration_dur = max(0.1, getattr(block, "speech_dur", 0.0))
+                    narration_dur = round(block.narration_end - block.narration_start, 3)
                 if narration_dur <= 0.0:
                     narration_dur = 3.5  # absolute minimum
 
@@ -1003,14 +1003,18 @@ class VideoEngine:
                     if speed_ratio > 2.0:
                         # Movie clip much longer than narration: trim to narration_dur
                         cut_end = min(movie_start + narration_dur, total_movie_dur)
-                        speed_ratio = 1.0
+
+                    orig_clip_dur = max(0.1, cut_end - movie_start)
+                    # Correct PTS factor: target speech duration / original cut duration
+                    pts_factor = narration_dur / orig_clip_dur
 
                     cmd_cut = [
                         ffmpeg_bin, "-y",
                         "-ss", str(round(movie_start, 3)),
                         "-to", str(round(cut_end, 3)),
                         "-i", input_video,
-                        "-vf", f"setpts={round(speed_ratio, 4)}*PTS-STARTPTS",
+                        "-vf", f"setpts={round(pts_factor, 4)}*PTS-STARTPTS,fps=24",
+                        "-t", str(round(narration_dur, 3)),
                         "-c:v", "libx264", "-preset", "ultrafast", "-crf", "23",
                         "-an",
                         clip_out
@@ -1031,7 +1035,8 @@ class VideoEngine:
                         "-ss", str(round(movie_start, 3)),
                         "-to", str(round(extended_end, 3)),
                         "-i", input_video,
-                        "-vf", "setpts=PTS-STARTPTS",
+                        "-vf", "setpts=PTS-STARTPTS,fps=24",
+                        "-t", str(round(narration_dur, 3)),
                         "-c:v", "libx264", "-preset", "ultrafast", "-crf", "23",
                         "-an",
                         clip_out
@@ -1072,6 +1077,7 @@ class VideoEngine:
                         f"tpad=stop_mode=clone:stop_duration={round(gap_remaining, 3)},"
                         f"zoompan=z='min(zoom+{zoom_step},1.05)':d={freeze_frames}"
                         f":x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':s=iw:sh=ih:fps={freeze_fps}",
+                        "-t", str(round(narration_dur, 3)),
                         "-c:v", "libx264", "-preset", "ultrafast", "-crf", "23",
                         "-an",
                         clip_out
@@ -1086,6 +1092,7 @@ class VideoEngine:
                             ffmpeg_bin, "-y",
                             "-i", clip_cut,
                             "-vf", f"tpad=stop_mode=clone:stop_duration={round(gap_remaining, 3)}",
+                            "-t", str(round(narration_dur, 3)),
                             "-c:v", "libx264", "-preset", "ultrafast", "-crf", "23",
                             "-an",
                             clip_out
@@ -1107,13 +1114,14 @@ class VideoEngine:
                     clip_paths.append(clip_out)
                     continue
 
-                # Final per-block fallback: simple -t trim from movie_start
+                # Final per-block fallback: simple -t trim from movie_start with tpad hold
                 cmd_fb = [
                     ffmpeg_bin, "-y",
                     "-ss", str(round(movie_start, 3)),
                     "-t", str(round(narration_dur, 3)),
                     "-i", input_video,
-                    "-vf", "setpts=PTS-STARTPTS",
+                    "-vf", f"setpts=PTS-STARTPTS,fps=24,tpad=stop_mode=clone:stop_duration={round(narration_dur, 3)}",
+                    "-t", str(round(narration_dur, 3)),
                     "-c:v", "libx264", "-preset", "ultrafast", "-crf", "23",
                     "-an",
                     clip_out
@@ -1316,6 +1324,9 @@ class VideoEngine:
         speed_factor = 1.02 if drift_enabled else 1.0
 
         post_vf = []
+        # Hold frame buffer to guarantee video stream never terminates before master soundtrack
+        post_vf.append("tpad=stop_mode=clone:stop_duration=60")
+
         # Anti-copyright: color grade + speed sync
         if drift_enabled:
             post_vf.append("eq=contrast=1.03:brightness=0.01:saturation=1.06")
