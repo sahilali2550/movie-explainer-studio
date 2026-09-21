@@ -7,9 +7,9 @@ from app.core.config import MUSIC_DIR, SFX_DIR, get_ffmpeg_binary
 
 class AudioMixer:
     """
-    Audio Mixing & Soundscape Engine.
+    Universal Audio Mixing & Soundscape Engine.
     Handles background mood music selection, procedural synth fallbacks,
-    intelligent audio ducking, and master track normalization.
+    dynamic sidechain ducking, non-attenuated amix mixing, and master track normalization.
     """
 
     @staticmethod
@@ -46,13 +46,12 @@ class AudioMixer:
         ffmpeg_bin = get_ffmpeg_binary()
         dur = max(2.0, duration)
 
-        # Warm harmonic drone frequencies with soft attack/decay and lowpass filtering
         if mood in ["suspense", "dark", "horror"]:
             filt = (
                 f"[0:a]volume=0.08,lowpass=f=220[d1];"
                 f"[1:a]volume=0.06,lowpass=f=260[d2];"
                 f"[2:a]volume=0.02,lowpass=f=180[noise];"
-                f"[d1][d2][noise]amix=inputs=3:dropout_transition=2,afade=t=in:ss=0:d=1.5,afade=t=out:st={max(0.1, dur-1.5)}:d=1.5[a]"
+                f"[d1][d2][noise]amix=inputs=3:dropout_transition=2:normalize=0,afade=t=in:ss=0:d=1.5,afade=t=out:st={max(0.1, dur-1.5)}:d=1.5[a]"
             )
             inputs = [
                 "-f", "lavfi", "-i", f"sine=frequency=55:duration={dur}",
@@ -63,7 +62,7 @@ class AudioMixer:
             filt = (
                 f"[0:a]volume=0.07,lowpass=f=340[p1];"
                 f"[1:a]volume=0.06,lowpass=f=380[p2];"
-                f"[p1][p2]amix=inputs=2:dropout_transition=2,afade=t=in:ss=0:d=2,afade=t=out:st={max(0.1, dur-2)}:d=2[a]"
+                f"[p1][p2]amix=inputs=2:dropout_transition=2:normalize=0,afade=t=in:ss=0:d=2,afade=t=out:st={max(0.1, dur-2)}:d=2[a]"
             )
             inputs = [
                 "-f", "lavfi", "-i", f"sine=frequency=110:duration={dur}",
@@ -74,7 +73,7 @@ class AudioMixer:
                 f"[0:a]volume=0.08,lowpass=f=280[t1];"
                 f"[1:a]volume=0.07,lowpass=f=320[t2];"
                 f"[2:a]volume=0.03,lowpass=f=200[noise];"
-                f"[t1][t2][noise]amix=inputs=3:dropout_transition=1,afade=t=in:ss=0:d=1,afade=t=out:st={max(0.1, dur-1)}:d=1[a]"
+                f"[t1][t2][noise]amix=inputs=3:dropout_transition=1:normalize=0,afade=t=in:ss=0:d=1,afade=t=out:st={max(0.1, dur-1)}:d=1[a]"
             )
             inputs = [
                 "-f", "lavfi", "-i", f"sine=frequency=65.41:duration={dur}",
@@ -102,20 +101,26 @@ class AudioMixer:
         bgm_volume: float = 0.16
     ) -> bool:
         """
-        Combines voiceover and background score with voice ducking:
-        - Voiceover stays 100% crisp and intelligible.
-        - BGM provides emotional depth without overpowering the narration.
-        - Exact duration trimming matching the voiceover.
+        Combines voiceover and background score with true dynamic sidechain ducking:
+        - Voiceover splits into master audio and sidechain trigger.
+        - BGM ducks automatically when speech is active (threshold 0.125, ratio 4:1).
+        - amix uses normalize=0 to prevent 1/N voice attenuation.
         """
         ffmpeg_bin = get_ffmpeg_binary()
-        dur = round(voice_duration, 2)
+        dur = max(1.0, round(voice_duration, 2))
+
+        filter_str = (
+            f"[0:a]volume=1.0,apad=whole_dur={dur},asplit=2[vox_main][vox_sc];"
+            f"[1:a]volume={bgm_volume}[bg_in];"
+            f"[bg_in][vox_sc]sidechaincompress=threshold=0.125:ratio=4:attack=15:release=250[bg_ducked];"
+            f"[vox_main][bg_ducked]amix=inputs=2:duration=first:dropout_transition=2:normalize=0,atrim=0:{dur}[a]"
+        )
 
         cmd = [
             ffmpeg_bin, "-y",
             "-i", voice_path,
             "-stream_loop", "-1", "-i", bgm_path,
-            "-filter_complex",
-            f"[0:a]volume=1.0[vox];[1:a]volume={bgm_volume}[bg];[vox][bg]amix=inputs=2:duration=first:dropout_transition=2,atrim=0:{dur}[a]",
+            "-filter_complex", filter_str,
             "-map", "[a]",
             "-c:a", "aac", "-b:a", "192k",
             output_path
@@ -134,8 +139,8 @@ class AudioMixer:
         """
         Creates a YouTube Studio-ready multi-language audio track (.mp3):
         - Matches master video duration exactly.
-        - Includes ducked background score for full theatrical immersion.
-        - Loudness normalized to -14 LUFS (YouTube audio standard).
+        - Dynamic sidechain ducked background score with normalize=0.
+        - Standardized loudness normalization to -14 LUFS (TP=-1.5 dB, LRA=11).
         """
         ffmpeg_bin = get_ffmpeg_binary()
         dur = max(1.0, round(target_duration, 2))
@@ -149,14 +154,18 @@ class AudioMixer:
                 output_path
             ]
         else:
+            filter_str = (
+                f"[0:a]volume=1.0,apad=whole_dur={dur},asplit=2[vox_main][vox_sc];"
+                f"[1:a]volume={bgm_volume}[bg_in];"
+                f"[bg_in][vox_sc]sidechaincompress=threshold=0.125:ratio=4:attack=15:release=250[bg_ducked];"
+                f"[vox_main][bg_ducked]amix=inputs=2:duration=first:dropout_transition=2:normalize=0,atrim=0:{dur},"
+                f"loudnorm=I=-14:TP=-1.5:LRA=11[a]"
+            )
             cmd = [
                 ffmpeg_bin, "-y",
                 "-i", voice_path,
                 "-stream_loop", "-1", "-i", bgm_path,
-                "-filter_complex",
-                f"[0:a]volume=1.0,apad=whole_dur={dur}[vox];"
-                f"[1:a]volume={bgm_volume}[bg];"
-                f"[vox][bg]amix=inputs=2:duration=first:dropout_transition=2,atrim=0:{dur},loudnorm=I=-14:TP=-1.5:LRA=11[a]",
+                "-filter_complex", filter_str,
                 "-map", "[a]",
                 "-c:a", "libmp3lame", "-b:a", "192k",
                 output_path
@@ -194,7 +203,7 @@ class AudioMixer:
         cues: List[Dict[str, Any]] = []
         dur = max(5.0, total_duration)
 
-        # 1. Integrate explicit AI Director / Sound Designer cues
+        # 1. Explicit AI Director / Sound Designer cues
         if explicit_sfx_cues:
             for ec in explicit_sfx_cues:
                 t = float(ec.get("time", 0.0))
@@ -209,7 +218,7 @@ class AudioMixer:
         if not any(c["time"] <= 1.5 and c["sfx"] == "sub_boom" for c in cues):
             cues.append({"time": 0.2, "sfx": "sub_boom", "volume": 0.50})
 
-        # 3. Scene Transitions (whooshes at scene cuts) if fewer than 2 explicit cues
+        # 3. Scene Transitions (whooshes at scene cuts)
         if not explicit_sfx_cues or len(explicit_sfx_cues) < 2:
             if scene_starts:
                 for s in scene_starts:
@@ -231,7 +240,7 @@ class AudioMixer:
             elif genre == "biography":
                 cues.append({"time": round(dur * 0.35, 2), "sfx": "clock_tick", "volume": 0.35})
 
-            # Climax Impact (around 80% duration)
+            # Climax Impact
             if dur >= 15.0:
                 cues.append({"time": round(dur * 0.82, 2), "sfx": "sub_boom", "volume": 0.55})
 
@@ -252,11 +261,10 @@ class AudioMixer:
     ) -> bool:
         """
         Universal Master Soundtrack Mixer supporting 3 modes:
-        1. 'hybrid': Voiceover + Ducked BGM + Strategic SFX cues.
+        1. 'hybrid': Voiceover + Ducked BGM + Strategic SFX cues (All amix calls use normalize=0).
         2. 'sfx_only': Voiceover + Strategic SFX cues (No Music, 0% copyright risk).
-        3. 'music_only': Classic Voiceover + Ducked BGM.
+        3. 'music_only': Classic Voiceover + Dynamic Ducked BGM.
         """
-        ffmpeg_bin = get_ffmpeg_binary()
         dur = max(1.0, round(voice_duration, 2))
 
         if audio_mode == "music_only":
@@ -285,17 +293,28 @@ class AudioMixer:
             else:
                 return AudioMixer.create_isolated_dub_track(voice_path, None, output_path, dur)
 
-        # Build FFmpeg command with adelay filter
+        ffmpeg_bin = get_ffmpeg_binary()
         inputs = ["-i", voice_path]
-        filter_parts = [f"[0:a]volume=1.0,apad=whole_dur={dur}[vox]"]
-        mix_inputs = ["[vox]"]
+        filter_parts = []
+        mix_inputs = []
 
-        curr_idx = 1
-        if audio_mode == "hybrid" and bgm_path and os.path.exists(bgm_path):
+        has_bgm = (audio_mode == "hybrid" and bgm_path and os.path.exists(bgm_path))
+
+        if has_bgm:
+            # Voiceover split: [vox_main] for output mix, [vox_sc] as sidechain compressor trigger
             inputs.extend(["-stream_loop", "-1", "-i", bgm_path])
-            filter_parts.append(f"[{curr_idx}:a]volume={bgm_volume}[bg]")
-            mix_inputs.append("[bg]")
-            curr_idx += 1
+            filter_parts.append(
+                f"[0:a]volume=1.0,apad=whole_dur={dur},asplit=2[vox_main][vox_sc];"
+                f"[1:a]volume={bgm_volume}[bg_in];"
+                f"[bg_in][vox_sc]sidechaincompress=threshold=0.125:ratio=4:attack=15:release=250[bg_ducked]"
+            )
+            mix_inputs.append("[vox_main]")
+            mix_inputs.append("[bg_ducked]")
+            curr_idx = 2
+        else:
+            filter_parts.append(f"[0:a]volume=1.0,apad=whole_dur={dur}[vox_main]")
+            mix_inputs.append("[vox_main]")
+            curr_idx = 1
 
         selected_cues = valid_cues[:12]
         for s_path, t_sec, vol in selected_cues:
@@ -305,7 +324,11 @@ class AudioMixer:
             mix_inputs.append(f"[sfx{curr_idx}]")
             curr_idx += 1
 
-        amix_chain = f"{''.join(mix_inputs)}amix=inputs={len(mix_inputs)}:duration=first:dropout_transition=2,atrim=0:{dur},loudnorm=I=-14:TP=-1.5:LRA=11[a]"
+        # Enforce normalize=0 to preserve voiceover level, then normalize to -14 LUFS
+        amix_chain = (
+            f"{''.join(mix_inputs)}amix=inputs={len(mix_inputs)}:duration=first:dropout_transition=2:normalize=0,"
+            f"atrim=0:{dur},loudnorm=I=-14:TP=-1.5:LRA=11[a]"
+        )
         filter_parts.append(amix_chain)
         full_filter = ";".join(filter_parts)
 
@@ -325,5 +348,3 @@ class AudioMixer:
             return AudioMixer.mix_voiceover_and_bgm(voice_path, bgm_path, output_path, dur, bgm_volume)
         else:
             return AudioMixer.create_isolated_dub_track(voice_path, None, output_path, dur)
-
-

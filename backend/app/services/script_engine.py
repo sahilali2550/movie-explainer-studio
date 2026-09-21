@@ -912,6 +912,35 @@ class ScriptEngine:
         return max(130, int(round(duration_mins * base_wpm * mult)))
 
     @staticmethod
+    def calculate_dynamic_pacing(source_duration_sec: float) -> Dict[str, Any]:
+        """
+        Feature #2: Dynamic Pacing & Scene Segmentation Formula.
+        Calculates optimal explainer duration and scene block count based on source length.
+        """
+        sec = float(source_duration_sec) if source_duration_sec and source_duration_sec > 0 else 3600.0
+        
+        if sec < 900:  # Short Video (< 15 mins)
+            target_duration_mins = 3
+            target_scenes = 5
+            category = "short"
+        elif sec <= 2700:  # Medium / Drama (15 to 45 mins)
+            target_duration_mins = 5
+            target_scenes = 7
+            category = "medium"
+        else:  # Full Movie (1 to 3+ hours)
+            target_duration_mins = 8
+            target_scenes = 11
+            category = "feature_film"
+
+        return {
+            "source_duration_sec": sec,
+            "target_duration_mins": target_duration_mins,
+            "target_scenes": target_scenes,
+            "category": category,
+            "rule_description": f"{category.upper()}: {target_duration_mins} mins explainer across ~{target_scenes} scenes"
+        }
+
+    @staticmethod
     def partition_timeline(source_duration_sec: float, target_duration_mins: int = 10) -> List[Dict[str, Any]]:
         """
         Universal 5-Act Timeline Milestone Partitioner.

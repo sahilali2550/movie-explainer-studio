@@ -73,17 +73,79 @@ class VideoEngine:
         return ""
 
     @staticmethod
-    def get_duration(video_path: str) -> float:
-        """Returns total duration of media file in seconds."""
+    def probe_media(video_path: str) -> Dict[str, Any]:
+        """
+        Feature #1 Upgrade: Bulletproof Metadata Inspection.
+        Extracts duration, resolution, FPS, and stream codecs accurately without guessing.
+        """
+        if not video_path or not os.path.exists(video_path):
+            raise FileNotFoundError(f"Source video not found: {video_path}")
+
         ffprobe = get_ffprobe_binary()
+        cmd = [
+            ffprobe,
+            "-v", "error",
+            "-show_entries", "format=duration,size,bit_rate:stream=index,codec_type,codec_name,width,height,r_frame_rate,duration",
+            "-of", "json",
+            video_path
+        ]
+        
         try:
+            res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=True)
+            info = json.loads(res.stdout)
+            
+            # Duration calculation (Format duration fallback to Stream duration)
+            fmt_dur = info.get("format", {}).get("duration")
+            v_streams = [s for s in info.get("streams", []) if s.get("codec_type") == "video"]
+            a_streams = [s for s in info.get("streams", []) if s.get("codec_type") == "audio"]
+            
+            video_dur = None
+            if fmt_dur and fmt_dur != "N/A":
+                video_dur = float(fmt_dur)
+            elif v_streams and v_streams[0].get("duration") and v_streams[0].get("duration") != "N/A":
+                video_dur = float(v_streams[0]["duration"])
+            
+            if not video_dur or video_dur <= 0:
+                raise ValueError(f"Could not determine valid duration for '{video_path}'. File may be corrupt.")
+
+            # FPS calculation
+            fps = 30.0
+            if v_streams:
+                r_fps = v_streams[0].get("r_frame_rate", "30/1")
+                if "/" in r_fps:
+                    num, den = r_fps.split("/")
+                    fps = round(float(num) / float(den), 2) if float(den) > 0 else 30.0
+
+            width = int(v_streams[0].get("width", 1920)) if v_streams else 1920
+            height = int(v_streams[0].get("height", 1080)) if v_streams else 1080
+
+            return {
+                "file_path": video_path,
+                "duration": video_dur,
+                "width": width,
+                "height": height,
+                "fps": fps,
+                "aspect_ratio": "vertical" if height > width else ("square" if height == width else "horizontal"),
+                "has_audio": len(a_streams) > 0,
+                "video_codec": v_streams[0].get("codec_name") if v_streams else "unknown",
+                "audio_codec": a_streams[0].get("codec_name") if a_streams else "none"
+            }
+        except Exception as e:
+            raise RuntimeError(f"MediaProbeError for '{video_path}': {str(e)}")
+
+    @staticmethod
+    def get_duration(video_path: str) -> float:
+        """Safe wrapper that relies on comprehensive probe_media instead of hardcoded 60s fallback."""
+        try:
+            meta = VideoEngine.probe_media(video_path)
+            return meta["duration"]
+        except Exception:
+            ffprobe = get_ffprobe_binary()
             cmd = [ffprobe, "-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", video_path]
             res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-            if res.returncode == 0:
+            if res.returncode == 0 and res.stdout.strip():
                 return float(res.stdout.strip())
-        except Exception:
-            pass
-        return 60.0
+            raise RuntimeError(f"Unable to determine duration for source: {video_path}")
 
     @staticmethod
     def _timestamp_to_seconds(t_str: str) -> float:
@@ -906,7 +968,11 @@ class VideoEngine:
                 )
             return output_video
 
-        total_movie_dur = VideoEngine.get_duration(input_video)
+        try:
+            meta = VideoEngine.probe_media(input_video)
+            total_movie_dur = float(meta.get("duration", 0.0))
+        except Exception:
+            total_movie_dur = VideoEngine.get_duration(input_video)
         clip_paths: List[str] = []
         concat_file = os.path.join(temp_dir, f"{job_id}_alc_concat.txt")
 
@@ -1089,6 +1155,18 @@ class VideoEngine:
                     os.remove(concat_file)
                 except Exception:
                     pass
+            # Deep clean any intermediate/leftover clips for this job
+            if temp_dir and os.path.exists(temp_dir):
+                try:
+                    import glob
+                    for leftover in glob.glob(os.path.join(temp_dir, f"{job_id}_alc_*")):
+                        if os.path.isfile(leftover):
+                            try:
+                                os.remove(leftover)
+                            except Exception:
+                                pass
+                except Exception:
+                    pass
 
         # ── Global fallback ────────────────────────────────────────────────────
         print("[AudioLockedSync] Falling back to sample_timeline()")
@@ -1201,6 +1279,7 @@ class VideoEngine:
         part_number: int = 1,
         num_parts: int = 1,
         lang: str = "en",
+        anti_copyright_drift: bool = True,
         **kwargs
     ) -> bool:
         """
@@ -1233,10 +1312,14 @@ class VideoEngine:
             )
             v_base = "[vcomp]"
 
+        drift_enabled = bool(kwargs.get("anti_copyright_drift", anti_copyright_drift))
+        speed_factor = 1.02 if drift_enabled else 1.0
+
         post_vf = []
         # Anti-copyright: color grade + speed sync
-        post_vf.append("eq=contrast=1.03:brightness=0.01:saturation=1.06")
-        post_vf.append("setpts=PTS/1.02")
+        if drift_enabled:
+            post_vf.append("eq=contrast=1.03:brightness=0.01:saturation=1.06")
+            post_vf.append("setpts=PTS/1.02")
 
         # Part Badge at top (ONLY render if multi-part series mode is enabled with num_parts > 1)
         if num_parts > 1 and part_number >= 1:
@@ -1267,18 +1350,23 @@ class VideoEngine:
                 aspect_ratio=aspect_ratio,
                 lang=lang,
                 timed_cues=timed_cues,
-                speed_factor=1.02
+                speed_factor=speed_factor
             ):
                 clean_ass = temp_ass_path.replace("\\", "/").replace(":", "\\:")
                 fonts_dir_esc = str(FONTS_DIR.resolve()).replace("\\", "/").replace(":", "\\:")
                 post_vf.append(f"subtitles='{clean_ass}':fontsdir='{fonts_dir_esc}'")
 
+        if not post_vf:
+            post_vf.append("null")
         filter_parts.append(f";{v_base}{','.join(post_vf)}[vfinal]")
-        filter_parts.append(";[1:a]atempo=1.02[afinal]")
+        if drift_enabled:
+            filter_parts.append(";[1:a]atempo=1.02[afinal]")
+        else:
+            filter_parts.append(";[1:a]anull[afinal]")
         final_filter = "".join(filter_parts)
 
         # Exact matched duration for both synchronized streams
-        render_dur = round(duration / 1.02, 2)
+        render_dur = round(duration / speed_factor, 2)
 
         cmd = [
             ffmpeg_bin, "-y",

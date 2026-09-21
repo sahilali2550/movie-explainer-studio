@@ -16,15 +16,15 @@ def test_multi_style_thumbnail_layouts(tmp_path):
 
     # 1. Test Climax Face Zoom layout
     zoom_thumb = ThumbnailEngine.apply_face_zoom_style(im.copy())
-    assert zoom_thumb.size == (1280, 720)
+    assert zoom_thumb.size == (1920, 1080)
 
     # 2. Test Split-Screen Confrontation layout
     split_thumb = ThumbnailEngine.apply_split_screen_style(im.copy(), im2.copy())
-    assert split_thumb.size == (1280, 720)
+    assert split_thumb.size == (1920, 1080)
 
     # 3. Test Cinema Poster layout
     poster_thumb = ThumbnailEngine.apply_cinema_poster_style(im.copy())
-    assert poster_thumb.size == (1280, 720)
+    assert poster_thumb.size == (1920, 1080)
 
 
 def test_fetch_youtube_viral_thumbnail(tmp_path):

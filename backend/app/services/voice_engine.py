@@ -71,7 +71,7 @@ class VoiceEngine:
         text: str,
         voice: str,
         output_path: str,
-        rate: str = "+15%",
+        rate: str = "+0%",
         pitch: str = "+0Hz"
     ) -> bool:
         """
@@ -82,6 +82,10 @@ class VoiceEngine:
         clean_text = text.strip()
         if not clean_text:
             return False
+        if not rate:
+            rate = "+0%"
+        if not pitch:
+            pitch = "+0Hz"
 
         import json
 
@@ -261,7 +265,7 @@ class VoiceEngine:
         text: str,
         voice: str,
         output_path: str,
-        rate: str = "+15%",
+        rate: str = "+0%",
         pitch: str = "+0Hz"
     ) -> bool:
         """Synchronous wrapper for synthesize_speech."""
@@ -313,8 +317,12 @@ class VoiceEngine:
 
     @staticmethod
     def get_audio_duration(audio_path: str) -> float:
-        """Extracts exact duration in seconds using ffprobe."""
+        """
+        Extracts exact duration in seconds using ffprobe.
+        Falls back to companion cues.json if probe fails, or raises RuntimeError.
+        """
         import subprocess
+        import json
         from app.core.config import get_ffprobe_binary
         ffprobe_bin = get_ffprobe_binary()
         try:
@@ -322,10 +330,28 @@ class VoiceEngine:
                 ffprobe_bin, "-v", "error", "-show_entries", "format=duration",
                 "-of", "default=noprint_wrappers=1:nokey=1", audio_path
             ]
-            out = subprocess.check_output(cmd, stderr=subprocess.PIPE).decode().strip()
-            return float(out)
+            res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            if res.returncode == 0 and res.stdout.strip():
+                dur = float(res.stdout.strip())
+                if dur > 0:
+                    return dur
         except Exception:
-            return 0.0
+            pass
+
+        # Check companion cues.json fallback
+        cues_file = os.path.splitext(audio_path)[0] + "_cues.json" if audio_path else ""
+        if cues_file and os.path.exists(cues_file):
+            try:
+                with open(cues_file, "r", encoding="utf-8") as jf:
+                    cues = json.load(jf)
+                if cues and isinstance(cues, list):
+                    last_end = float(cues[-1].get("end", 0.0))
+                    if last_end > 0:
+                        return last_end
+            except Exception:
+                pass
+
+        raise RuntimeError(f"Unable to determine audio duration for: {audio_path}")
 
     @classmethod
     async def generate_cloned_preview(
@@ -375,10 +401,11 @@ class VoiceEngine:
         text: str,
         language: str,
         output_path: str,
-        rate: str = "+10%"
+        rate: str = "+0%"
     ) -> bool:
         """Synthesizes the full movie recap story using acoustic cloned resonance."""
         import subprocess
+        import shutil
         from app.core.config import get_ffmpeg_binary
         base_voice = cls.get_default_voice_for_lang(language)
         temp_raw = output_path.replace(".mp3", "_rawtemp.mp3")
@@ -387,15 +414,34 @@ class VoiceEngine:
         if not tts_ok or not os.path.exists(temp_raw):
             return False
 
+        # Propagate companion cues file from temp_raw to output_path for downstream A/V sync
+        raw_cues_candidates = [
+            os.path.splitext(temp_raw)[0] + "_cues.json",
+            temp_raw + "_cues.json"
+        ]
+        target_cues = os.path.splitext(output_path)[0] + "_cues.json"
+        for rc in raw_cues_candidates:
+            if os.path.exists(rc):
+                try:
+                    shutil.copy2(rc, target_cues)
+                    break
+                except Exception as ce:
+                    print(f"[VoiceEngine Cues Transfer Notice] {ce}")
+
         ffmpeg_bin = get_ffmpeg_binary()
         filt_str = "equalizer=f=250:width_type=h:width=120:g=2.0,equalizer=f=3200:width_type=h:width=220:g=1.6,loudnorm"
         try:
             cmd = [ffmpeg_bin, "-y", "-i", temp_raw, "-af", filt_str, output_path]
             subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
-            if os.path.exists(temp_raw):
-                try: os.remove(temp_raw)
-                except Exception: pass
             return os.path.exists(output_path) and os.path.getsize(output_path) > 1000
         except Exception as e:
             print(f"[Cloned Story Synthesis Error] {e}")
             return False
+        finally:
+            if os.path.exists(temp_raw):
+                try: os.remove(temp_raw)
+                except Exception: pass
+            for rc in raw_cues_candidates:
+                if os.path.exists(rc) and os.path.abspath(rc) != os.path.abspath(target_cues):
+                    try: os.remove(rc)
+                    except Exception: pass
