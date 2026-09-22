@@ -9,6 +9,42 @@ class MetadataEngine:
     """
 
     @staticmethod
+    def clean_movie_title(raw_title: str) -> str:
+        """
+        Strips pipes, release years, and spam tags (Full Movie, Blockbuster, Hollywood Film, HD, etc.)
+        to extract the clean, pure title (e.g. 'Sera The Untold | Hollywood Blockbuster Full Movie HD' -> 'Sera The Untold').
+        """
+        if not raw_title:
+            return "This Viral Story"
+
+        # Split by common title separators: |, •, /, –, —
+        # Typically the actual movie name is in the first segment
+        segments = re.split(r'[\s]*[|•\/\–\—][\s]*', raw_title)
+        title = segments[0].strip() if segments else raw_title.strip()
+
+        # Remove trailing/leading parentheses or brackets like (2024), [HD], (Full Movie)
+        title = re.sub(r'[\(\[\{][^\)\]\}]*[\)\]\}]', ' ', title)
+
+        # Remove noise words and spam patterns
+        noise_patterns = [
+            r'\b(?:full\s*movie|blockbuster|hollywood|bollywood|tollywood|film|hindi\s*dubbed|urdu\s*dubbed|english\s*subtitles|subtitles|trailer|teaser|recap|ending\s*explained|explained|action\s*movie|hd|4k|1080p|720p|bluray|official)\b',
+            r'\b(?:19\d\d|20\d\d)\b',  # Years like 1999, 2023, 2024
+        ]
+        for pat in noise_patterns:
+            title = re.sub(pat, ' ', title, flags=re.IGNORECASE)
+
+        # Clean underscores, dashes, multiple spaces
+        title = title.replace('_', ' ').replace('-', ' ').strip()
+        title = re.sub(r'\s+', ' ', title).strip()
+
+        if not title or len(title) < 2 or title.lower() in ["movie", "story", "video"]:
+            fallback = segments[0].strip() if segments else raw_title.strip()
+            fallback = re.sub(r'[|_]', ' ', fallback).strip()
+            return fallback or "This Viral Story"
+
+        return title
+
+    @staticmethod
     def generate_viral_metadata(
         movie_title: str,
         script_snippet: str,
@@ -19,7 +55,7 @@ class MetadataEngine:
         Generates click-to-copy metadata package tailored to the video's language and genre.
         Supports: movie_recap, biography, documentary, true_crime, tech_science, video_essay.
         """
-        clean_title = movie_title.replace('_', ' ').replace('-', ' ').strip()
+        clean_title = MetadataEngine.clean_movie_title(movie_title)
         if not clean_title or clean_title == "Movie Story Explanation":
             clean_title = "This Viral Story"
 

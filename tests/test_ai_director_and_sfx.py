@@ -86,3 +86,50 @@ def test_video_engine_clamps_ai_scene_ranges():
     for s, e in cuts:
         assert 0.0 <= s < movie_dur
         assert s < e <= movie_dur
+
+
+def test_bulletproof_script_and_tts_sanitization():
+    """
+    Verifies that lines starting with [SFX: ...] are never dropped,
+    and all director tags/brackets are completely sanitized for TTS and Storyboard.
+    """
+    from app.services.voice_engine import VoiceEngine
+
+    messy_script = """
+    [SCENE 1: 00:00 - 00:15]
+    [VOICEOVER]
+    [SFX: HEARTBEAT] کہانی کا آغاز ایک پراسرار کمرے سے ہوتا ہے۔
+    [SFX: WHOOSH] [DIALOGUE_REF: "Who is there?"] جہاں ایک شخص خوف سے کانپ رہا تھا۔
+    
+    [SCENE 2: 00:15 - 00:30]
+    [VOICEOVER]
+    [SFX: TENSION_RISER] اچانک دروازہ کھلتا ہے اور سچ سامنے آتا ہے۔
+    """
+    clean_text, ranges, subs = ScriptEngine.parse_storyboard(messy_script)
+    assert len(ranges) == 2
+    assert "کہانی کا آغاز" in clean_text
+    assert "شخص خوف سے کانپ رہا تھا" in clean_text
+    assert "اچانک دروازہ کھلتا ہے" in clean_text
+    assert "HEARTBEAT" not in clean_text
+    assert "WHOOSH" not in clean_text
+    assert "TENSION_RISER" not in clean_text
+    assert "SCENE" not in clean_text
+    assert "VOICEOVER" not in clean_text
+    assert "[" not in clean_text
+    assert "]" not in clean_text
+
+    blocks = ScriptEngine.parse_storyboard_blocks(messy_script)
+    assert len(blocks) == 2
+    assert blocks[0].word_count > 0
+    assert blocks[1].word_count > 0
+    assert "کہانی کا آغاز" in blocks[0].narration_text
+
+    tts_clean = VoiceEngine.sanitize_narration_for_tts(messy_script)
+    assert "SCENE" not in tts_clean
+    assert "VOICEOVER" not in tts_clean
+    assert "SFX" not in tts_clean
+    assert "HEARTBEAT" not in tts_clean
+    assert "[" not in tts_clean
+    assert "]" not in tts_clean
+    assert "کہانی کا آغاز ایک پراسرار کمرے سے ہوتا ہے۔" in tts_clean
+

@@ -3,6 +3,7 @@ import re
 import json
 import uuid
 import subprocess
+import math
 from typing import Dict, List, Tuple, Optional, Any
 from app.core.config import get_ffmpeg_binary, get_ffprobe_binary, TEMP_DIR, UPLOADS_DIR, OUTPUTS_DIR, FONTS_DIR
 
@@ -1052,6 +1053,7 @@ class VideoEngine:
                                 "-i", input_video,
                                 "-vf", "setpts=PTS-STARTPTS,fps=24",
                                 "-t", str(round(this_dur, 3)),
+                                "-avoid_negative_ts", "make_zero",
                                 "-c:v", "libx264", "-preset", "ultrafast", "-crf", "23",
                                 "-an",
                                 mc_out
@@ -1065,6 +1067,7 @@ class VideoEngine:
                                 "-i", input_video,
                                 "-vf", f"setpts=PTS-STARTPTS,fps=24,tpad=stop_mode=clone:stop_duration={gap}",
                                 "-t", str(round(this_dur, 3)),
+                                "-avoid_negative_ts", "make_zero",
                                 "-c:v", "libx264", "-preset", "ultrafast", "-crf", "23",
                                 "-an",
                                 mc_out
@@ -1117,6 +1120,7 @@ class VideoEngine:
                         "-i", input_video,
                         "-vf", f"setpts={round(pts_factor, 4)}*PTS-STARTPTS,fps=24",
                         "-t", str(round(narration_dur, 3)),
+                        "-avoid_negative_ts", "make_zero",
                         "-c:v", "libx264", "-preset", "ultrafast", "-crf", "23",
                         "-an",
                         clip_out
@@ -1139,6 +1143,7 @@ class VideoEngine:
                         "-i", input_video,
                         "-vf", "setpts=PTS-STARTPTS,fps=24",
                         "-t", str(round(narration_dur, 3)),
+                        "-avoid_negative_ts", "make_zero",
                         "-c:v", "libx264", "-preset", "ultrafast", "-crf", "23",
                         "-an",
                         clip_out
@@ -1160,6 +1165,7 @@ class VideoEngine:
                     "-to", str(round(actual_end, 3)),
                     "-i", input_video,
                     "-vf", "setpts=PTS-STARTPTS",
+                    "-avoid_negative_ts", "make_zero",
                     "-c:v", "libx264", "-preset", "ultrafast", "-crf", "23",
                     "-an",
                     clip_cut
@@ -1169,7 +1175,7 @@ class VideoEngine:
                 if os.path.exists(clip_cut) and os.path.getsize(clip_cut) > 0 and gap_remaining > 0.05:
                     # Step 2: Option-B — tpad freeze + zoompan subtle push-in
                     freeze_fps = 24
-                    freeze_frames = int(_math.ceil(gap_remaining * freeze_fps))
+                    freeze_frames = int(math.ceil(gap_remaining * freeze_fps))
                     zoom_step = round(0.05 / max(1, freeze_frames), 6)
 
                     cmd_freeze = [
@@ -1288,6 +1294,57 @@ class VideoEngine:
         )
 
     @staticmethod
+    def chunk_subtitle_cue(
+        text: str,
+        start_sec: float,
+        end_sec: float,
+        max_words: int = 8,
+        max_duration: float = 5.0
+    ) -> List[Tuple[float, float, str]]:
+        """
+        Splits long narration cues (>5s or >8 words) into short, punchy 3.0-5.0s lines
+        with proportional timestamp distribution for professional readability.
+        Strips technical and metadata tags automatically.
+        """
+        from app.services.script_engine import ScriptEngine
+        clean_text = ScriptEngine.strip_production_tags(text).strip()
+        if not clean_text:
+            return []
+
+        words = clean_text.split()
+        total_dur = max(0.1, end_sec - start_sec)
+
+        if len(words) <= max_words and total_dur <= max_duration:
+            return [(start_sec, end_sec, clean_text)]
+
+        chunks_by_words = max(1, int(math.ceil(len(words) / max_words)))
+        chunks_by_time = max(1, int(math.ceil(total_dur / max_duration)))
+        num_chunks = max(chunks_by_words, chunks_by_time)
+
+        words_per_chunk = int(math.ceil(len(words) / num_chunks))
+        text_slices = []
+        for i in range(0, len(words), words_per_chunk):
+            chunk_slice = " ".join(words[i:i + words_per_chunk]).strip()
+            if chunk_slice:
+                text_slices.append(chunk_slice)
+
+        if not text_slices:
+            return [(start_sec, end_sec, clean_text)]
+
+        total_chars = sum(len(s) for s in text_slices)
+        cues = []
+        curr_t = start_sec
+        for idx, s in enumerate(text_slices):
+            prop = len(s) / max(1, total_chars)
+            seg_dur = round(total_dur * prop, 3)
+            next_t = round(curr_t + seg_dur, 3) if idx < len(text_slices) - 1 else end_sec
+            if next_t > curr_t:
+                cues.append((curr_t, next_t, s))
+            curr_t = next_t
+
+        return cues
+
+    @staticmethod
     def generate_ass_subtitle_file(
         scene_subtitles: List[str],
         total_duration: float,
@@ -1295,7 +1352,8 @@ class VideoEngine:
         aspect_ratio: str = "horizontal",
         lang: str = "en",
         timed_cues: Optional[List[Dict[str, Any]]] = None,
-        speed_factor: float = 1.02
+        speed_factor: float = 1.02,
+        chunk_cues: bool = False
     ) -> bool:
         """
         Generates an Advanced SubStation Alpha (.ass) file with HarfBuzz/FriBiDi compatible
@@ -1307,11 +1365,15 @@ class VideoEngine:
         if (not scene_subtitles and not timed_cues) or total_duration <= 0:
             return False
 
+        from app.services.script_engine import ScriptEngine
+
         res_x = 1080 if aspect_ratio == "vertical" else (1080 if aspect_ratio == "square" else 1920)
         res_y = 1920 if aspect_ratio == "vertical" else (1080 if aspect_ratio == "square" else 1080)
         font_size = 44 if aspect_ratio == "vertical" else 36
         margin_v = 140 if aspect_ratio == "vertical" else 75
         box_padding = 10 if aspect_ratio == "vertical" else 8
+
+        font_name = "Noto Nastaliq Urdu" if lang in ["ur", "ar"] else ("Nirmala UI" if lang == "hi" else "Arial")
 
         ass_lines = [
             "[Script Info]",
@@ -1321,7 +1383,7 @@ class VideoEngine:
             "",
             "[V4+ Styles]",
             "Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding",
-            f"Style: Default,Arial,{font_size},&H00FFFFFF,&H000000FF,&H00000000,&HB0000000,1,0,0,0,100,100,0,0,3,{box_padding},0,2,30,30,{margin_v},1",
+            f"Style: Default,{font_name},{font_size},&H00FFFFFF,&H000000FF,&H00000000,&HB0000000,1,0,0,0,100,100,0,0,3,{box_padding},0,2,30,30,{margin_v},1",
             "",
             "[Events]",
             "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text"
@@ -1341,19 +1403,27 @@ class VideoEngine:
 
         if timed_cues and len(timed_cues) > 0:
             for cue in timed_cues:
-                text_clean = str(cue.get("text", "")).strip().replace("\r", " ").replace("\n", " ")
-                if not text_clean:
+                raw_text = ScriptEngine.strip_production_tags(str(cue.get("text", ""))).strip().replace("\r", " ").replace("\n", " ")
+                if not raw_text:
                     continue
                 t_s = max(0.0, float(cue.get("start", 0.0))) / sf
                 t_e = min(effective_dur, float(cue.get("end", t_s + 2.5)) / sf)
                 if t_e <= t_s:
                     t_e = min(effective_dur, t_s + 1.5)
-                start_str = sec_to_ass(t_s)
-                end_str = sec_to_ass(t_e)
-                ass_lines.append(f"Dialogue: 0,{start_str},{end_str},Default,,0,0,0,,{text_clean}")
+
+                if chunk_cues:
+                    cues_to_add = VideoEngine.chunk_subtitle_cue(raw_text, t_s, t_e)
+                else:
+                    cues_to_add = [(t_s, t_e, raw_text)]
+
+                for sub_s, sub_e, sub_text in cues_to_add:
+                    start_str = sec_to_ass(sub_s)
+                    end_str = sec_to_ass(sub_e)
+                    ass_lines.append(f"Dialogue: 0,{start_str},{end_str},Default,,0,0,0,,{sub_text}")
         elif scene_subtitles:
             # Proportional duration based on string length (Syllable/Character-weighted)
-            clean_subs = [s.strip().replace("\r", " ").replace("\n", " ") for s in scene_subtitles if s.strip()]
+            clean_subs = [ScriptEngine.strip_production_tags(s).strip().replace("\r", " ").replace("\n", " ") for s in scene_subtitles if s.strip()]
+            clean_subs = [s for s in clean_subs if s]
             total_chars = sum(max(1, len(s)) for s in clean_subs)
             curr_time = 0.0
             for idx, text_snip in enumerate(clean_subs):
@@ -1364,9 +1434,15 @@ class VideoEngine:
                 if idx == len(clean_subs) - 1:
                     t_e = effective_dur
                 if t_e > t_s:
-                    start_str = sec_to_ass(t_s)
-                    end_str = sec_to_ass(t_e)
-                    ass_lines.append(f"Dialogue: 0,{start_str},{end_str},Default,,0,0,0,,{text_snip}")
+                    if chunk_cues:
+                        cues_to_add = VideoEngine.chunk_subtitle_cue(text_snip, t_s, t_e)
+                    else:
+                        cues_to_add = [(t_s, t_e, text_snip)]
+
+                    for sub_s, sub_e, sub_text in cues_to_add:
+                        start_str = sec_to_ass(sub_s)
+                        end_str = sec_to_ass(sub_e)
+                        ass_lines.append(f"Dialogue: 0,{start_str},{end_str},Default,,0,0,0,,{sub_text}")
                     curr_time = t_e
 
         try:
@@ -1427,7 +1503,8 @@ class VideoEngine:
 
         post_vf = []
         # Hold frame buffer to guarantee video stream never terminates before master soundtrack
-        post_vf.append("tpad=stop_mode=clone:stop_duration=60")
+        tpad_hold = max(60, int(duration + 30))
+        post_vf.append(f"tpad=stop_mode=clone:stop_duration={tpad_hold}")
 
         # Anti-copyright: color grade + speed sync
         if drift_enabled:
@@ -1463,7 +1540,8 @@ class VideoEngine:
                 aspect_ratio=aspect_ratio,
                 lang=lang,
                 timed_cues=timed_cues,
-                speed_factor=speed_factor
+                speed_factor=speed_factor,
+                chunk_cues=True
             ):
                 clean_ass = temp_ass_path.replace("\\", "/").replace(":", "\\:")
                 fonts_dir_esc = str(FONTS_DIR.resolve()).replace("\\", "/").replace(":", "\\:")

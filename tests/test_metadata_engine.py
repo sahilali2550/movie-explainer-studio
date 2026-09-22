@@ -88,3 +88,14 @@ def test_metadata_engine_biography_and_true_crime_urdu():
     )
     assert any("سازش" in t or "خوفناک" in t for t in crime_res["titles"])
     assert "#TrueCrime" in crime_res["hashtags"]
+
+
+def test_metadata_engine_clean_movie_title():
+    """Verify that clean_movie_title strips spam keywords, release years, and pipes."""
+    assert MetadataEngine.clean_movie_title("Sera The Untold | Hollywood Blockbuster Full Movie in Hindi Dubbed 2024 HD") == "Sera The Untold"
+    assert MetadataEngine.clean_movie_title("Inception (2010) [1080p BluRay]") == "Inception"
+    assert MetadataEngine.clean_movie_title("The Dark Knight - Official Trailer") == "The Dark Knight"
+    assert MetadataEngine.clean_movie_title("Titanic") == "Titanic"
+    assert MetadataEngine.clean_movie_title("KGF Chapter 2 | Full Hindi Movie 2022") == "KGF Chapter 2"
+    assert MetadataEngine.clean_movie_title("") == "This Viral Story"
+

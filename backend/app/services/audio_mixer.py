@@ -112,8 +112,8 @@ class AudioMixer:
         filter_str = (
             f"[0:a]volume=1.0,apad=whole_dur={dur},asplit=2[vox_main][vox_sc];"
             f"[1:a]volume={bgm_volume}[bg_in];"
-            f"[bg_in][vox_sc]sidechaincompress=threshold=0.125:ratio=4:attack=15:release=250[bg_ducked];"
-            f"[vox_main][bg_ducked]amix=inputs=2:duration=first:dropout_transition=2:normalize=0,atrim=0:{dur}[a]"
+            f"[bg_in][vox_sc]sidechaincompress=threshold=0.08:ratio=4:attack=50:release=300[bg_ducked];"
+            f"[vox_main][bg_ducked]amix=inputs=2:duration=first:dropout_transition=2:normalize=0,atrim=0:{dur},loudnorm=I=-14:TP=-1.5:LRA=11[a]"
         )
 
         cmd = [
@@ -157,7 +157,7 @@ class AudioMixer:
             filter_str = (
                 f"[0:a]volume=1.0,apad=whole_dur={dur},asplit=2[vox_main][vox_sc];"
                 f"[1:a]volume={bgm_volume}[bg_in];"
-                f"[bg_in][vox_sc]sidechaincompress=threshold=0.125:ratio=4:attack=15:release=250[bg_ducked];"
+                f"[bg_in][vox_sc]sidechaincompress=threshold=0.08:ratio=4:attack=50:release=300[bg_ducked];"
                 f"[vox_main][bg_ducked]amix=inputs=2:duration=first:dropout_transition=2:normalize=0,atrim=0:{dur},"
                 f"loudnorm=I=-14:TP=-1.5:LRA=11[a]"
             )
@@ -306,7 +306,7 @@ class AudioMixer:
             filter_parts.append(
                 f"[0:a]volume=1.0,apad=whole_dur={dur},asplit=2[vox_main][vox_sc];"
                 f"[1:a]volume={bgm_volume}[bg_in];"
-                f"[bg_in][vox_sc]sidechaincompress=threshold=0.125:ratio=4:attack=15:release=250[bg_ducked]"
+                f"[bg_in][vox_sc]sidechaincompress=threshold=0.08:ratio=4:attack=50:release=300[bg_ducked]"
             )
             mix_inputs.append("[vox_main]")
             mix_inputs.append("[bg_ducked]")
@@ -327,7 +327,7 @@ class AudioMixer:
         # Enforce normalize=0 to preserve voiceover level, then normalize to -14 LUFS
         amix_chain = (
             f"{''.join(mix_inputs)}amix=inputs={len(mix_inputs)}:duration=first:dropout_transition=2:normalize=0,"
-            f"atrim=0:{dur},loudnorm=I=-14:TP=-1.5:LRA=11[a]"
+            f"atrim=0:{dur},loudnorm=I=-14:LRA=11:TP=-1.5[a]"
         )
         filter_parts.append(amix_chain)
         full_filter = ";".join(filter_parts)

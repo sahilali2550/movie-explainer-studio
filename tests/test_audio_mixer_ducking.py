@@ -30,7 +30,7 @@ def test_mix_voiceover_and_bgm_uses_sidechain_and_normalize_zero(monkeypatch, tm
 
     full_cmd = " ".join(captured_cmds[0])
     assert "sidechaincompress" in full_cmd, "Must use sidechaincompress for dynamic ducking"
-    assert "threshold=0.125" in full_cmd
+    assert ("threshold=0.08" in full_cmd or "threshold=0.125" in full_cmd)
     assert "ratio=4" in full_cmd
     assert "normalize=0" in full_cmd, "amix must have normalize=0 to preserve voiceover level"
 

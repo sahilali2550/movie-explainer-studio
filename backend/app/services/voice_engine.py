@@ -67,6 +67,39 @@ class VoiceEngine:
         return chunks
 
     @staticmethod
+    def sanitize_narration_for_tts(text: str) -> str:
+        """
+        Bulletproof pre-TTS sanitizer (Defense-in-Depth).
+        Aggressively strips all metadata, director tags, timestamps, SFX cues,
+        and lingering brackets so Edge-TTS receives ONLY pure spoken storytelling dialogue.
+        Under NO circumstance will technical labels or timestamps be read aloud by TTS.
+        """
+        if not text:
+            return ""
+        # 1. Bracketed tags (LTR and RTL reversed brackets)
+        c = re.sub(r'[\[\]]\s*(?:SCENE|TIME|VOICEOVER|SFX|DIALOGUE_REF|PART|BANNER)\b[^\[\]\n]*[\[\]]', ' ', text, flags=re.IGNORECASE)
+        # 2. Standalone tags at line start or followed by colon/bracket
+        c = re.sub(r'^\s*(?:SCENE|TIME|VOICEOVER|SFX|DIALOGUE_REF|BANNER)\b[^:\n]*[:\n]?', ' ', c, flags=re.MULTILINE | re.IGNORECASE)
+        # 3. Explicit tag patterns with colons or closing brackets (e.g. [SFX: HEARTBEAT, VOICEOVER], SCENE: 01:00])
+        c = re.sub(r'(?:\[|\b)(?:SCENE|TIME|VOICEOVER|SFX|DIALOGUE_REF|BANNER)\s*:[^\]\n]*\]?', ' ', c, flags=re.IGNORECASE)
+        c = re.sub(r'\b(?:SCENE|VOICEOVER|SFX|DIALOGUE_REF|BANNER)\b\s*\]', ' ', c, flags=re.IGNORECASE)
+        # 4. Multi-part headings (e.g. === PART 1 ===, [PART 1], PART 1:)
+        c = re.sub(r'(?:===|\[|\b)PART\s*\d+\b[^=\]\n]*(?:===|\]|:)?', ' ', c, flags=re.IGNORECASE)
+        # 5. Any remaining bracketed content
+        c = re.sub(r'\[.*?\]', ' ', c)
+        # 6. Standalone lines of keywords or horizontal rules
+        c = re.sub(r'^\s*(?:SCENE|TIME|VOICEOVER|SFX|BANNER|DIALOGUE_REF|DIALOGUE)\b.*$', '', c, flags=re.MULTILINE | re.IGNORECASE)
+        c = re.sub(r'^\s*[=\-~_]{2,}.*$', '', c, flags=re.MULTILINE)
+        # 7. Strip isolated brackets, asterisks, hashes
+        c = re.sub(r'[\[\]\*#_~`]', ' ', c)
+        c = re.sub(r'^\d+[\.\)]\s*', '', c, flags=re.MULTILINE)
+        c = re.sub(r'^(?:dialogue_ref|dialogue)\s*:\s*.*', '', c, flags=re.IGNORECASE | re.MULTILINE)
+        c = re.sub(r'^(?:voiceover|narration)\s*:\s*', '', c, flags=re.IGNORECASE | re.MULTILINE)
+        c = re.sub(r'[ \t]+', ' ', c)
+        c = re.sub(r'\n\s*\n+', '\n', c).strip()
+        return c
+
+    @staticmethod
     async def synthesize_speech(
         text: str,
         voice: str,
@@ -79,7 +112,7 @@ class VoiceEngine:
         For long scripts, automatically chunks text to prevent WebSocket timeout drops,
         retries failed chunks, and seamlessly stitches audio with offset-adjusted cues.
         """
-        clean_text = text.strip()
+        clean_text = VoiceEngine.sanitize_narration_for_tts(text)
         if not clean_text:
             return False
         if not rate:

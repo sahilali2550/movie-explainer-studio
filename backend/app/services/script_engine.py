@@ -362,6 +362,42 @@ class ScriptEngine:
         }
 
     @staticmethod
+    def strip_production_tags(t: str) -> str:
+        """
+        Aggressively strips director tags, metadata, timestamps, and SFX markers:
+        - [SCENE: MM:SS - MM:SS] or SCENE: MM:SS - MM:SS]
+        - [VOICEOVER] or VOICEOVER]
+        - [SFX: ...]
+        - [DIALOGUE_REF: ...]
+        - PART or ===PART N===
+        - isolated brackets, asterisks, hashes
+        Returns clean, purely vocal narrative dialogue.
+        """
+        if not t:
+            return ""
+        # 1. Bracketed tags (LTR and RTL reversed brackets)
+        c = re.sub(r'[\[\]]\s*(?:SCENE|TIME|VOICEOVER|SFX|DIALOGUE_REF|PART|BANNER)\b[^\[\]\n]*[\[\]]', ' ', t, flags=re.IGNORECASE)
+        # 2. Standalone tags at line start or followed by colon/bracket
+        c = re.sub(r'^\s*(?:SCENE|TIME|VOICEOVER|SFX|DIALOGUE_REF|BANNER)\b[^:\n]*[:\n]?', ' ', c, flags=re.MULTILINE | re.IGNORECASE)
+        # 3. Explicit tag patterns with colons or closing brackets (e.g. [SFX: HEARTBEAT, VOICEOVER], SCENE: 01:00])
+        c = re.sub(r'(?:\[|\b)(?:SCENE|TIME|VOICEOVER|SFX|DIALOGUE_REF|BANNER)\s*:[^\]\n]*\]?', ' ', c, flags=re.IGNORECASE)
+        c = re.sub(r'\b(?:SCENE|VOICEOVER|SFX|DIALOGUE_REF|BANNER)\b\s*\]', ' ', c, flags=re.IGNORECASE)
+        # 4. Multi-part headings (e.g. === PART 1 ===, [PART 1], PART 1:)
+        c = re.sub(r'(?:===|\[|\b)PART\s*\d+\b[^=\]\n]*(?:===|\]|:)?', ' ', c, flags=re.IGNORECASE)
+        # 5. Any remaining bracketed content
+        c = re.sub(r'\[.*?\]', ' ', c)
+        # 6. Standalone lines of keywords or horizontal rules
+        c = re.sub(r'^\s*(?:SCENE|TIME|VOICEOVER|SFX|BANNER|DIALOGUE_REF|DIALOGUE)\b.*$', '', c, flags=re.MULTILINE | re.IGNORECASE)
+        c = re.sub(r'^\s*[=\-~_]{2,}.*$', '', c, flags=re.MULTILINE)
+        # 7. Strip isolated brackets, asterisks, hashes
+        c = re.sub(r'[\[\]\*#_~`]', ' ', c)
+        c = re.sub(r'^\d+[\.\)]\s*', '', c, flags=re.MULTILINE)
+        c = re.sub(r'^(?:dialogue_ref|dialogue)\s*:\s*.*', '', c, flags=re.IGNORECASE | re.MULTILINE)
+        c = re.sub(r'^(?:voiceover|narration)\s*:\s*', '', c, flags=re.IGNORECASE | re.MULTILINE)
+        c = re.sub(r'[ \t]+', ' ', c)
+        return c.strip()
+
+    @staticmethod
     def parse_storyboard(raw_script: str) -> Tuple[str, List[Tuple[float, float]], List[str]]:
         """
         Extracts clean voiceover narration text, scene timestamp cuts (e.g. 01:23 - 02:45),
@@ -391,17 +427,14 @@ class ScriptEngine:
                 ranges.append((s_sec, e_sec))
 
         # 2. Extract clean voiceover blocks
-        vo_blocks = re.findall(r'\[VOICEOVER\]\s*(.*?)(?=\[SCENE:|===PART|📝|\Z)', raw_script, flags=re.DOTALL | re.IGNORECASE)
+        vo_blocks = re.findall(r'(?:\[VOICEOVER\]|\bVOICEOVER\b\]?)\s*(.*?)(?=(?:\[(?:SCENE|TIME)|SCENE\s*\d*:|===PART|📝|\Z))', raw_script, flags=re.DOTALL | re.IGNORECASE)
         clean_blocks = []
         scene_subs = []
 
         if vo_blocks:
             for b in vo_blocks:
-                lines = [l.strip() for l in b.splitlines() if l.strip() and not l.strip().startswith(('#', '[', '📌', '🏷️', '📝', '---', '==='))]
-                cleaned_b = ' '.join(lines)
-                cleaned_b = re.sub(r'\[.*?\]', '', cleaned_b)
-                cleaned_b = re.sub(r'\s+', ' ', cleaned_b).strip()
-                if len(cleaned_b) > 5:
+                cleaned_b = ScriptEngine.strip_production_tags(b)
+                if len(cleaned_b) > 3:
                     clean_blocks.append(cleaned_b)
                     scene_subs.append(cleaned_b[:80])
             final_text = ' '.join(clean_blocks)
@@ -410,14 +443,11 @@ class ScriptEngine:
             clean_lines = []
             for line in raw_script.splitlines():
                 l = line.strip()
-                if not l or l.startswith(('#', '[SCENE', '[TIME', '[BANNER', '===PART', 'Option:')):
+                if not l or l.startswith(('#', '📌', '🏷️', '📝', '---', '===', 'Option:')):
                     continue
-                # Strip leading numbering (e.g. '1. ') while keeping narration text
-                l = re.sub(r'^\d+[\.\)]\s*', '', l)
-                l = re.sub(r'\[.*?\]', '', l)
-                l = re.sub(r'\*+', '', l)
-                if len(l) > 8:
-                    clean_lines.append(l)
+                cl = ScriptEngine.strip_production_tags(l)
+                if len(cl) > 3:
+                    clean_lines.append(cl)
             final_text = ' '.join(clean_lines)
 
         final_text = re.sub(r'\s+', ' ', final_text).strip()
@@ -554,21 +584,17 @@ class ScriptEngine:
             return 0.0
 
         def clean_narration_chunk(txt: str) -> str:
-            vo_m = re.search(r'\[VOICEOVER\]\s*(.*?)(?=\[SCENE:|===PART|📝|\Z)', txt, flags=re.DOTALL | re.IGNORECASE)
+            vo_m = re.search(r'(?:\[VOICEOVER\]|\bVOICEOVER\b\]?)\s*(.*?)(?=(?:\[(?:SCENE|TIME)|SCENE\s*\d*:|===PART|📝|\Z))', txt, flags=re.DOTALL | re.IGNORECASE)
             target = vo_m.group(1) if vo_m else txt
 
             lines = []
             for l in target.splitlines():
                 line = l.strip()
-                if not line or line.startswith(('#', '[', '📌', '🏷️', '📝', '---', '===', 'Option:')):
+                if not line or line.startswith(('#', '📌', '🏷️', '📝', '---', '===', 'Option:')):
                     continue
-                line = re.sub(r'^\d+[\.\)]\s*', '', line)
-                line = re.sub(r'\[.*?\]', '', line)
-                line = re.sub(r'\*+', '', line)
-                line = re.sub(r'^(?:dialogue_ref|dialogue)\s*:\s*.*', '', line, flags=re.IGNORECASE)
-                line = re.sub(r'^(?:voiceover|narration)\s*:\s*', '', line, flags=re.IGNORECASE)
-                if len(line) > 3:
-                    lines.append(line)
+                cl = ScriptEngine.strip_production_tags(line)
+                if len(cl) > 3:
+                    lines.append(cl)
             cleaned = ' '.join(lines)
             cleaned = re.sub(r'\s+', ' ', cleaned).strip()
             return cleaned

@@ -108,3 +108,59 @@ def test_ass_subtitles_proportional_duration_fallback(tmp_path):
     cue2_dur = float(p2[2].split(":")[-1]) - float(p2[1].split(":")[-1])
     assert cue2_dur > cue1_dur * 1.5, f"Expected long sentence to have significantly more duration: {cue2_dur} vs {cue1_dur}"
 
+
+def test_ass_subtitles_noto_nastaliq_font_for_urdu(tmp_path):
+    """Verify that Urdu and Arabic use Noto Nastaliq Urdu font in ASS styles."""
+    from app.services.video_engine import VideoEngine
+    ass_file = str(tmp_path / "test_font.ass")
+    ok = VideoEngine.generate_ass_subtitle_file(
+        scene_subtitles=["یہ ایک جملہ ہے۔"],
+        total_duration=5.0,
+        output_ass_path=ass_file,
+        lang="ur"
+    )
+    assert ok is True
+    with open(ass_file, "r", encoding="utf-8") as f:
+        content = f.read()
+    assert "Style: Default,Noto Nastaliq Urdu," in content
+
+
+def test_ass_subtitles_production_tag_stripping(tmp_path):
+    """Verify that technical tags ([SCENE: ...], [SFX: ...], etc.) are never burned to ASS subtitles."""
+    from app.services.video_engine import VideoEngine
+    ass_file = str(tmp_path / "test_tags.ass")
+    tagged_sub = "[SCENE 1: 00:00 - 00:15] [VOICEOVER] [SFX: HEARTBEAT] اصل کہانی یہاں سے شروع ہوتی ہے [DIALOGUE_REF: 'Help me']"
+    ok = VideoEngine.generate_ass_subtitle_file(
+        scene_subtitles=[tagged_sub],
+        total_duration=6.0,
+        output_ass_path=ass_file,
+        lang="ur"
+    )
+    assert ok is True
+    with open(ass_file, "r", encoding="utf-8") as f:
+        content = f.read()
+    assert "[SCENE" not in content
+    assert "VOICEOVER" not in content
+    assert "SFX" not in content
+    assert "DIALOGUE_REF" not in content
+    assert "اصل کہانی یہاں سے شروع ہوتی ہے" in content
+
+
+def test_ass_subtitles_long_cue_chunking(tmp_path):
+    """Verify that long sentences with chunk_cues=True break into punchy 3-5s lines."""
+    from app.services.video_engine import VideoEngine
+    ass_file = str(tmp_path / "test_chunk.ass")
+    long_paragraph = "یہ ایک بہت بڑا اور تفصیلی پیراگراف ہے جس میں کہانی کے تمام اہم واقعات اور پراسرار راز کھولے گئے ہیں اور ہر بات واضح کی گئی ہے۔"
+    ok = VideoEngine.generate_ass_subtitle_file(
+        scene_subtitles=[long_paragraph],
+        total_duration=15.0,
+        output_ass_path=ass_file,
+        lang="ur",
+        chunk_cues=True
+    )
+    assert ok is True
+    with open(ass_file, "r", encoding="utf-8") as f:
+        lines = [line for line in f if line.startswith("Dialogue: 0,")]
+    assert len(lines) >= 3  # Long paragraph cleanly divided into multiple punchy lines
+
+
