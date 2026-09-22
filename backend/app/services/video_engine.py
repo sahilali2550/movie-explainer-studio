@@ -997,6 +997,108 @@ class VideoEngine:
                 # ── Strategy selection ─────────────────────────────────────────
                 speed_ratio = movie_window / narration_dur if narration_dur > 0 else 1.0
 
+                # 3-5 Second Micro-Cut Rule:
+                # If narration_dur > 5.0, slice 3 to 4 sequential micro-cuts (each 3.0s-5.0s)
+                # centered around the anchored dialogue timestamp (movie_start).
+                if narration_dur > 5.0 and total_movie_dur > 5.0:
+                    n_cuts = max(2, int(round(narration_dur / 3.8)))
+                    base_dur = round(narration_dur / n_cuts, 3)
+                    mc_durs = [base_dur] * n_cuts
+                    mc_durs[-1] = round(narration_dur - sum(mc_durs[:-1]), 3)
+
+                    # Center cuts around the anchored dialogue timestamp
+                    scene_anchor = movie_start
+                    scene_end = min(total_movie_dur, max(movie_end, scene_anchor + narration_dur))
+                    actual_span = max(0.1, scene_end - scene_anchor)
+
+                    if actual_span >= narration_dur:
+                        max_offset = actual_span - mc_durs[0]
+                        step = max_offset / max(1, n_cuts - 1) if n_cuts > 1 else 0.0
+                        cut_starts = [round(min(total_movie_dur - mc_durs[k], scene_anchor + k * step), 3) for k in range(n_cuts)]
+                    else:
+                        cut_starts = [round(min(total_movie_dur - mc_durs[k], scene_anchor + sum(mc_durs[:k])), 3) for k in range(n_cuts)]
+
+                    # If speed_ratio < 0.5 (extension required), record the extended -to call for Option-C
+                    extended_end = min(total_movie_dur, movie_start + narration_dur)
+                    if speed_ratio < 0.5:
+                        clip_scene = os.path.join(temp_dir, f"{job_id}_alc_{idx}_scene.mp4")
+                        cmd_extend = [
+                            ffmpeg_bin, "-y",
+                            "-ss", str(round(movie_start, 3)),
+                            "-to", str(round(extended_end, 3)),
+                            "-i", input_video,
+                            "-vf", "setpts=PTS-STARTPTS,fps=24",
+                            "-t", str(round(narration_dur, 3)),
+                            "-c:v", "libx264", "-preset", "ultrafast", "-crf", "23",
+                            "-an",
+                            clip_scene
+                        ]
+                        subprocess.run(cmd_extend, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+
+                    mc_paths = []
+                    mc_concat_file = os.path.join(temp_dir, f"{job_id}_alc_{idx}_mc_concat.txt")
+
+                    for k in range(n_cuts):
+                        this_dur = mc_durs[k]
+                        cut_s = cut_starts[k]
+                        mc_out = os.path.join(temp_dir, f"{job_id}_alc_{idx}_mc_{k}.mp4")
+                        avail = max(0.0, total_movie_dur - cut_s)
+
+                        if avail >= this_dur:
+                            cmd_mc = [
+                                ffmpeg_bin, "-y",
+                                "-ss", str(round(cut_s, 3)),
+                                "-t", str(round(this_dur, 3)),
+                                "-i", input_video,
+                                "-vf", "setpts=PTS-STARTPTS,fps=24",
+                                "-t", str(round(this_dur, 3)),
+                                "-c:v", "libx264", "-preset", "ultrafast", "-crf", "23",
+                                "-an",
+                                mc_out
+                            ]
+                        else:
+                            gap = round(this_dur - avail, 3)
+                            cmd_mc = [
+                                ffmpeg_bin, "-y",
+                                "-ss", str(round(cut_s, 3)),
+                                "-t", str(round(max(0.1, avail), 3)),
+                                "-i", input_video,
+                                "-vf", f"setpts=PTS-STARTPTS,fps=24,tpad=stop_mode=clone:stop_duration={gap}",
+                                "-t", str(round(this_dur, 3)),
+                                "-c:v", "libx264", "-preset", "ultrafast", "-crf", "23",
+                                "-an",
+                                mc_out
+                            ]
+                        res_mc = subprocess.run(cmd_mc, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                        if res_mc.returncode == 0 and os.path.exists(mc_out) and os.path.getsize(mc_out) > 0:
+                            mc_paths.append(mc_out)
+
+                    if len(mc_paths) == n_cuts:
+                        with open(mc_concat_file, "w", encoding="utf-8") as f_mc:
+                            for p in mc_paths:
+                                clean_p = p.replace("\\", "/")
+                                f_mc.write(f"file '{clean_p}'\n")
+
+                        cmd_mc_concat = [
+                            ffmpeg_bin, "-y",
+                            "-f", "concat", "-safe", "0",
+                            "-i", mc_concat_file,
+                            "-c", "copy",
+                            clip_out
+                        ]
+                        res_c = subprocess.run(cmd_mc_concat, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                        for p in mc_paths:
+                            if os.path.exists(p):
+                                try: os.remove(p)
+                                except Exception: pass
+                        if os.path.exists(mc_concat_file):
+                            try: os.remove(mc_concat_file)
+                            except Exception: pass
+
+                        if res_c.returncode == 0 and os.path.exists(clip_out) and os.path.getsize(clip_out) > 0:
+                            clip_paths.append(clip_out)
+                            continue
+
                 if speed_ratio >= 0.5:
                     # ── Case A: ratio in [0.5, ∞) — cut + setpts or trim ──────
                     cut_end = movie_end

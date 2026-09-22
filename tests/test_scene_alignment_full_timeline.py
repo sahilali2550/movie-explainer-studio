@@ -75,21 +75,26 @@ class TestPTSMathAndAudioLockedScaling:
                 )
 
         assert ffmpeg_commands, "No FFmpeg commands executed"
-        clip_cmd = [c for c in ffmpeg_commands if "_alc_0" in str(c)][0]
-        cmd_str = " ".join(str(x) for x in clip_cmd)
 
         # Verify that setpts=0.5*PTS was NOT generated
-        assert "setpts=0.5" not in cmd_str, (
-            f"Inverted PTS detected in command: {cmd_str}. "
-            "setpts=0.5 speeds up video, cutting duration in half!"
-        )
+        for c in ffmpeg_commands:
+            cmd_str = " ".join(str(x) for x in c)
+            assert "setpts=0.5" not in cmd_str, (
+                f"Inverted PTS detected in command: {cmd_str}. "
+                "setpts=0.5 speeds up video, cutting duration in half!"
+            )
 
-        # Verify output duration -t is passed and equals 20.0 (or 20)
-        assert "-t" in clip_cmd, "Output duration -t flag must be present"
-        t_indices = [i for i, arg in enumerate(clip_cmd) if arg == "-t"]
-        # The output -t parameter (before output file)
-        out_t = float(clip_cmd[t_indices[-1] + 1])
-        assert abs(out_t - 20.0) < 0.1, f"Expected output clip duration 20.0s, got {out_t}"
+        # Verify output duration equals 20.0s (as micro-cuts sum or single clip -t)
+        mc_cmds = [c for c in ffmpeg_commands if "_mc_" in str(c) and "-t" in c]
+        if mc_cmds:
+            total_dur = sum(float(c[[idx for idx, arg in enumerate(c) if arg == "-t"][-1] + 1]) for c in mc_cmds)
+            assert abs(total_dur - 20.0) < 0.1, f"Expected total micro-cut duration 20.0s, got {total_dur}"
+        else:
+            clip_cmd = [c for c in ffmpeg_commands if "_alc_0" in str(c)][0]
+            assert "-t" in clip_cmd, "Output duration -t flag must be present"
+            t_indices = [i for i, arg in enumerate(clip_cmd) if arg == "-t"]
+            out_t = float(clip_cmd[t_indices[-1] + 1])
+            assert abs(out_t - 20.0) < 0.1, f"Expected output clip duration 20.0s, got {out_t}"
 
     def test_full_9m26s_script_produces_full_duration_clips(self):
         """
@@ -146,18 +151,31 @@ class TestPTSMathAndAudioLockedScaling:
                     output_video=fake_output
                 )
 
-        # Check all 8 clip generation commands
+        # Check all 8 clip generation commands (either as micro-cuts or single clip)
         total_assembled_dur = 0.0
         for i in range(len(blocks)):
-            clip_cmds = [c for c in ffmpeg_commands if f"_alc_{i}.mp4" in str(c)]
-            assert clip_cmds, f"No command generated for block {i}"
-            c = clip_cmds[-1]
-            t_indices = [idx for idx, arg in enumerate(c) if arg == "-t"]
-            out_t = float(c[t_indices[-1] + 1])
-            assert abs(out_t - block_durations[i]) < 0.1, (
-                f"Block {i} expected duration {block_durations[i]}s, got {out_t}s"
-            )
-            total_assembled_dur += out_t
+            mc_cmds = [c for c in ffmpeg_commands if f"_alc_{i}_mc_" in str(c) and "-t" in c]
+            if mc_cmds:
+                block_mc_dur = sum(
+                    float(c[[idx for idx, arg in enumerate(c) if arg == "-t"][-1] + 1])
+                    for c in mc_cmds
+                )
+                assert abs(block_mc_dur - block_durations[i]) < 0.1, (
+                    f"Block {i} micro-cuts sum {block_mc_dur}s != expected {block_durations[i]}s"
+                )
+                total_assembled_dur += block_mc_dur
+                concat_cmds = [c for c in ffmpeg_commands if f"_alc_{i}_mc_concat.txt" in str(c)]
+                assert len(concat_cmds) == 1, f"Missing concat command for block {i}"
+            else:
+                clip_cmds = [c for c in ffmpeg_commands if f"_alc_{i}.mp4" in str(c)]
+                assert clip_cmds, f"No command generated for block {i}"
+                c = clip_cmds[-1]
+                t_indices = [idx for idx, arg in enumerate(c) if arg == "-t"]
+                out_t = float(c[t_indices[-1] + 1])
+                assert abs(out_t - block_durations[i]) < 0.1, (
+                    f"Block {i} expected duration {block_durations[i]}s, got {out_t}s"
+                )
+                total_assembled_dur += out_t
 
         assert abs(total_assembled_dur - total_target_dur) < 0.5, (
             f"Total assembled duration ({total_assembled_dur}s) != target ({total_target_dur}s). "

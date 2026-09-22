@@ -17,6 +17,7 @@ class SceneBlock:
     speech_dur: float = 0.0     # actual allocated speech duration (seconds)
     narration_start: float = 0.0 # start timestamp in explainer voiceover
     narration_end: float = 0.0   # end timestamp in explainer voiceover
+    dialogue_ref: str = ""       # exact dialogue quote or reference from source movie
 
 
 class ScriptEngine:
@@ -564,6 +565,7 @@ class ScriptEngine:
                 line = re.sub(r'^\d+[\.\)]\s*', '', line)
                 line = re.sub(r'\[.*?\]', '', line)
                 line = re.sub(r'\*+', '', line)
+                line = re.sub(r'^(?:dialogue_ref|dialogue)\s*:\s*.*', '', line, flags=re.IGNORECASE)
                 line = re.sub(r'^(?:voiceover|narration)\s*:\s*', '', line, flags=re.IGNORECASE)
                 if len(line) > 3:
                     lines.append(line)
@@ -589,6 +591,16 @@ class ScriptEngine:
                 start_pos = m.end()
                 end_pos = matches[idx + 1].start() if idx + 1 < len(matches) else len(raw_script)
                 chunk = raw_script[start_pos:end_pos]
+
+                d_ref_m = re.search(
+                    r'(?:\[DIALOGUE_REF:\s*["\'“”‘’]?(.*?)["\'“”‘’]?\]|\bDIALOGUE_REF:\s*["\'“”‘’]?(.*?)["\'“”‘’]?(?=\n|\Z|\[))',
+                    chunk,
+                    flags=re.IGNORECASE
+                )
+                dialogue_ref = ""
+                if d_ref_m:
+                    dialogue_ref = (d_ref_m.group(1) or d_ref_m.group(2) or "").strip().strip('"\'“”‘’')
+
                 cleaned = clean_narration_chunk(chunk)
                 if not cleaned and idx == 0:
                     cleaned = clean_narration_chunk(raw_script[:m.start()])
@@ -599,7 +611,8 @@ class ScriptEngine:
                         movie_start=s_sec,
                         movie_end=e_sec,
                         narration_text=cleaned,
-                        word_count=w_count
+                        word_count=w_count,
+                        dialogue_ref=dialogue_ref
                     ))
 
         if not blocks:
@@ -690,6 +703,9 @@ class ScriptEngine:
                 return 0
             return len(block_tokens & cue_tokens)
 
+        def normalize_str(s: str) -> str:
+            return re.sub(r'[^\w\s]', '', s.lower(), flags=re.UNICODE).strip()
+
         # Pre-tokenise all blocks once
         block_token_sets = [tokenize(b.narration_text) for b in blocks]
 
@@ -699,8 +715,11 @@ class ScriptEngine:
 
         for b_idx, block in enumerate(blocks):
             b_tokens = block_token_sets[b_idx]
+            d_ref = getattr(block, "dialogue_ref", "") or ""
+            norm_ref = normalize_str(d_ref) if d_ref else ""
+            ref_tokens = tokenize(d_ref) if d_ref else set()
 
-            if not b_tokens:
+            if not b_tokens and not ref_tokens:
                 # No meaningful tokens → keep original timestamp
                 anchors.append(block.movie_start)
                 continue
@@ -713,7 +732,20 @@ class ScriptEngine:
                 # Only consider cues AFTER previous anchor (chronological lock)
                 if cue_start < prev_anchor:
                     continue
-                sc = score_match(b_tokens, cue.get("text", ""))
+                cue_text = cue.get("text", "")
+                norm_cue = normalize_str(cue_text)
+
+                sc = 0
+                if norm_ref:
+                    if norm_ref in norm_cue or (len(norm_ref) > 8 and norm_cue in norm_ref):
+                        sc = 1000 + len(ref_tokens)
+                    else:
+                        ref_overlap = len(ref_tokens & tokenize(cue_text))
+                        if ref_overlap > 0:
+                            sc = 100 * ref_overlap + score_match(b_tokens, cue_text)
+                if sc == 0:
+                    sc = score_match(b_tokens, cue_text)
+
                 if sc > best_score:
                     best_score = sc
                     best_cue_start = cue_start
