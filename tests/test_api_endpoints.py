@@ -115,18 +115,4 @@ def test_generate_script_endpoint_with_custom_transcript():
         assert "script" in data
 
 
-def test_fetch_wikipedia_plot_endpoint_validation():
-    """POST /api/v1/explainer/fetch-wikipedia-plot validates movie title parameter."""
-    # Empty title should return 400 Bad Request
-    res = client.post("/api/v1/explainer/fetch-wikipedia-plot", json={"title": ""})
-    assert res.status_code == 400
-
-    # Valid query format returns 200 with result payload
-    res2 = client.post("/api/v1/explainer/fetch-wikipedia-plot", json={"title": "Inception"})
-    assert res2.status_code == 200
-    data = res2.json()
-    assert "success" in data
-    assert "title" in data
-
-
 

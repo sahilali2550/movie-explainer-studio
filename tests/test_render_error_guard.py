@@ -30,7 +30,17 @@ def test_render_video_defines_final_video_path():
             pass
         return True
 
-    with patch("app.services.video_engine.VideoEngine.download_youtube_video", side_effect=mock_download_video), \
+    def mock_download_sections(url, scene_ranges, output_video, *args, **kwargs):
+        try:
+            with open(output_video, "wb") as f:
+                f.write(b"dummy video content 1234567890" * 100)
+        except Exception:
+            pass
+        return True
+
+    with patch("app.services.video_engine.VideoEngine.extract_youtube_info", return_value={"subtitles_text": "sample dialogue"}), \
+         patch("app.services.video_engine.VideoEngine.download_youtube_video", side_effect=mock_download_video), \
+         patch("app.services.video_engine.VideoEngine.download_youtube_sections", side_effect=mock_download_sections), \
          patch("app.services.video_engine.VideoEngine.get_duration", return_value=60.0), \
          patch("app.services.voice_engine.VoiceEngine.synthesize_speech", return_value=True), \
          patch("app.services.voice_engine.VoiceEngine.get_audio_duration", return_value=10.0), \
@@ -69,7 +79,8 @@ def test_render_video_returns_json_on_unhandled_exception():
     Verifies that unhandled pipeline exceptions return clean JSON (status 500)
     rather than unhandled Starlette plain text, preventing frontend JSON parse errors.
     """
-    with patch("app.services.video_engine.VideoEngine.download_youtube_video", side_effect=RuntimeError("Test crash inside pipeline")):
+    with patch("app.services.video_engine.VideoEngine.extract_youtube_info", return_value={"subtitles_text": "hello"}), \
+         patch("app.services.video_engine.VideoEngine.ensure_footage_integrity", side_effect=RuntimeError("Test crash inside pipeline")):
         res = client.post(
             "/api/v1/explainer/render-video",
             data={

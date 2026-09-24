@@ -239,9 +239,9 @@ function onAudioModeChange() {
 }
 
 const LANGUAGE_WPM = {
-  ur: 132, hi: 138, es: 165, pt: 160, id: 155, vi: 160,
-  en: 150, fr: 150, it: 155, tr: 150, de: 135, ar: 130,
-  ru: 130, th: 155, ja: 280, ko: 200
+  ur: 200, hi: 160, es: 165, pt: 160, id: 155, vi: 160,
+  en: 150, fr: 150, it: 155, tr: 155, de: 140, ar: 145,
+  ru: 135, th: 155, ja: 280, ko: 200
 };
 
 function updateEstimatedWordCount() {
@@ -987,80 +987,6 @@ async function auditionVoice() {
   } catch (err) {
     alert('Voice preview error: ' + err.message);
     btn.textContent = original; btn.disabled = false;
-  }
-}
-
-async function fetchWikipediaPlot() {
-  const titleInput = $('input-title');
-  let title = titleInput ? titleInput.value.trim() : '';
-
-  if (!title) {
-    const prompted = prompt('Please enter the Movie or Story Title to fetch from Wikipedia (e.g. Inception, Interstellar, The Dark Knight):');
-    if (prompted && prompted.trim()) {
-      title = prompted.trim();
-      if (titleInput) titleInput.value = title;
-    } else {
-      return;
-    }
-  }
-
-  const btn = $('btn-fetch-wiki');
-  const originalText = btn ? btn.innerHTML : '';
-  const statusEl = $('wiki-fetch-status');
-
-  if (btn) {
-    btn.disabled = true;
-    btn.innerHTML = '<span>⏳ Fetching…</span>';
-  }
-  if (statusEl) {
-    statusEl.style.display = 'block';
-    statusEl.style.color = '#38bdf8';
-    statusEl.textContent = `🔍 Searching Wikipedia for "${title}" plot...`;
-  }
-
-  try {
-    const res = await fetch('/api/v1/explainer/fetch-wikipedia-plot', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ title: title })
-    });
-    const data = await res.json();
-
-    if (data.success && data.plot) {
-      const transcriptArea = $('input-transcript');
-      if (transcriptArea) {
-        transcriptArea.value = data.plot;
-        const parentDetails = transcriptArea.closest('details');
-        if (parentDetails) parentDetails.open = true;
-      }
-      const notesInput = $('input-notes');
-      if (notesInput && !notesInput.value.trim()) {
-        notesInput.value = `Official Wikipedia plot summary for ${title}`;
-      }
-
-      const wordCount = data.plot.split(/\s+/).filter(Boolean).length;
-      if (statusEl) {
-        statusEl.style.color = '#34d399';
-        statusEl.innerHTML = `✅ <strong>Plot Loaded (${wordCount} words)!</strong> Ready for 1-Click Script Generation.`;
-      }
-    } else {
-      if (statusEl) {
-        statusEl.style.color = '#f87171';
-        statusEl.textContent = `⚠️ ${data.message || 'No Wikipedia plot section found for this title.'}`;
-      }
-      alert(data.message || `Could not find a Wikipedia plot section for "${title}". Please verify the title spelling or paste the plot manually.`);
-    }
-  } catch (err) {
-    if (statusEl) {
-      statusEl.style.color = '#f87171';
-      statusEl.textContent = `⚠️ Network error: ${err.message}`;
-    }
-    alert('Failed to connect to Wikipedia plot service: ' + err.message);
-  } finally {
-    if (btn) {
-      btn.disabled = false;
-      btn.innerHTML = originalText || '📖 Wikipedia Plot';
-    }
   }
 }
 

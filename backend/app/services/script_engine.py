@@ -48,70 +48,107 @@ class ScriptEngine:
         crime_kw = ["true crime", "forensic", "serial killer", "unsolved mystery", "cold case"]
         tech_kw = ["case study", "silicon valley", "startup", "tech giant", "billion dollar"]
 
+        det_lang = ScriptEngine.detect_transcript_language(combined)
         # Action/Spy/Thriller in title or description takes priority for movies
         if any(kw in combined for kw in action_kw):
-            return {
+            res = {
                 "genre": "movie_recap",
                 "persona": "hollywood_trailer",
                 "mood": "tense",
                 "spoiler_mode": "full_recap"
             }
         elif any(kw in combined for kw in horror_kw):
-            return {
+            res = {
                 "genre": "movie_recap",
                 "persona": "documentary",
                 "mood": "suspense",
                 "spoiler_mode": "full_recap"
             }
         elif any(kw in combined for kw in doc_kw):
-            return {
+            res = {
                 "genre": "documentary",
                 "persona": "documentary",
                 "mood": "suspense",
                 "spoiler_mode": "full_recap"
             }
         elif any(kw in combined for kw in bio_kw):
-            return {
+            res = {
                 "genre": "biography",
                 "persona": "documentary",
                 "mood": "emotional",
                 "spoiler_mode": "full_recap"
             }
         elif any(kw in combined for kw in crime_kw):
-            return {
+            res = {
                 "genre": "true_crime",
                 "persona": "documentary",
                 "mood": "tense",
                 "spoiler_mode": "full_recap"
             }
         elif any(kw in combined for kw in tech_kw):
-            return {
+            res = {
                 "genre": "tech_science",
                 "persona": "viral_fast",
                 "mood": "upbeat",
                 "spoiler_mode": "full_recap"
             }
         elif any(kw in combined for kw in romance_kw):
-            return {
+            res = {
                 "genre": "movie_recap",
                 "persona": "hollywood_trailer",
                 "mood": "emotional",
                 "spoiler_mode": "full_recap"
             }
         elif any(kw in combined for kw in scifi_kw):
-            return {
+            res = {
                 "genre": "movie_recap",
                 "persona": "hollywood_trailer",
                 "mood": "suspense",
                 "spoiler_mode": "full_recap"
             }
         else:
-            return {
+            res = {
                 "genre": "movie_recap",
                 "persona": "hollywood_trailer",
                 "mood": "suspense",
                 "spoiler_mode": "full_recap"
             }
+        res["detected_source_lang"] = det_lang
+        return res
+
+    @staticmethod
+    def detect_transcript_language(text: str) -> str:
+        """
+        Auto-detects language of source transcript, subtitles, or text.
+        Supports Urdu, Arabic, Hindi, Turkish, Korean, Japanese, Russian, and English.
+        """
+        if not text:
+            return "en"
+        
+        sample = text[:3000]
+        # Urdu distinctive characters (ٹ, ڈ, ڑ, ے, ں, ہ, ۂ, ۃ, ؤ)
+        if re.search(r'[\u0679\u0688\u0691\u06d2\u06ba\u06c1\u06c2\u06c3\u0624]', sample):
+            return "ur"
+        # Arabic script (without distinctive Urdu letters)
+        if re.search(r'[\u0600-\u06FF]', sample):
+            return "ar"
+        # Hindi Devanagari script
+        if re.search(r'[\u0900-\u097F]', sample):
+            return "hi"
+        # Korean Hangul
+        if re.search(r'[\uAC00-\uD7AF\u1100-\u11FF]', sample):
+            return "ko"
+        # Japanese Kana
+        if re.search(r'[\u3040-\u309F\u30A0-\u30FF]', sample):
+            return "ja"
+        # Russian Cyrillic
+        if re.search(r'[\u0400-\u04FF]', sample):
+            return "ru"
+        # Turkish distinctive letters (ç, ğ, ı, İ, ö, ş, ü, Ğ, Ş)
+        if re.search(r'[ğşışİĞŞ]', sample):
+            return "tr"
+        
+        return "en"
 
     @staticmethod
     def detect_episode_info(title: str, description: str = "") -> Dict[str, Any]:
@@ -174,55 +211,6 @@ class ScriptEngine:
         # 5. Clean up redundant empty lines
         text = re.sub(r'\n{3,}', '\n\n', text).strip()
         return text
-
-    @staticmethod
-    def fetch_wikipedia_plot(movie_title: str) -> Optional[str]:
-        """
-        Fetches the movie plot summary from Wikipedia using the official MediaWiki API.
-        Supports movie titles with or without year.
-        """
-        if not movie_title or not movie_title.strip():
-            return None
-
-        import urllib.parse
-        clean_title = re.sub(r'[^\w\s-]', '', movie_title).strip()
-        search_candidates = [
-            f"{clean_title} (film)",
-            clean_title,
-            f"{clean_title} movie"
-        ]
-
-        for term in search_candidates:
-            try:
-                encoded = urllib.parse.quote(term)
-                api_url = f"https://en.wikipedia.org/w/api.php?action=query&prop=extracts&exintro=0&explaintext=0&titles={encoded}&format=json"
-                req = urllib.request.Request(api_url, headers={"User-Agent": "AutoExplainer/2.0 (movie-explainer-saas)"})
-                with urllib.request.urlopen(req, timeout=10) as resp:
-                    data = json.loads(resp.read().decode("utf-8"))
-                    pages = data.get("query", {}).get("pages", {})
-                    for pid, pdata in pages.items():
-                        if pid == "-1":
-                            continue
-                        extract = pdata.get("extract", "")
-                        if not extract:
-                            continue
-
-                        # Search for Plot section in HTML/plain extract
-                        plot_match = re.search(r'<h3>(?:<span[^>]*>)?\s*Plot\s*(?:</span>)?</h3>\s*(.*?)(?=<h[23]|\Z)', extract, flags=re.DOTALL | re.IGNORECASE)
-                        if not plot_match:
-                            plot_match = re.search(r'<h2>(?:<span[^>]*>)?\s*Plot\s*(?:</span>)?</h2>\s*(.*?)(?=<h[23]|\Z)', extract, flags=re.DOTALL | re.IGNORECASE)
-                        if not plot_match:
-                            plot_match = re.search(r'===\s*Plot\s*===\s*(.*?)(?====|\Z)', extract, flags=re.DOTALL | re.IGNORECASE)
-
-                        raw_plot = plot_match.group(1) if plot_match else extract
-                        clean_plot = re.sub(r'<[^>]+>', ' ', raw_plot)
-                        clean_plot = re.sub(r'\s+', ' ', clean_plot).strip()
-                        if len(clean_plot) > 50:
-                            return clean_plot[:4500]
-            except Exception as e:
-                continue
-
-        return None
 
     @staticmethod
     def clamp_script_word_budget(
@@ -941,8 +929,8 @@ class ScriptEngine:
         return cues
 
     LANGUAGE_WPM = {
-        "ur": 132,  # Urdu (Edge-TTS Asad/Uzma speaks ~130-135 WPM at 1.0x)
-        "hi": 138,  # Hindi (Edge-TTS Madhur/Swara speaks ~135-140 WPM at 1.0x)
+        "ur": 200,  # Urdu (Edge-TTS Asad/Uzma speaks ~195-205 WPM at 1.0x)
+        "hi": 160,  # Hindi (Edge-TTS Madhur/Swara speaks ~155-165 WPM at 1.0x)
         "es": 165,  # Spanish (Edge-TTS Alvaro/Elvira speaks ~160-170 WPM)
         "pt": 160,  # Portuguese (Edge-TTS Antonio/Francisca ~155-165 WPM)
         "id": 155,  # Indonesian (Edge-TTS Ardi/Gadis ~150-160 WPM)
@@ -950,10 +938,10 @@ class ScriptEngine:
         "en": 150,  # English (Edge-TTS Christopher/Guy/Aria ~145-155 WPM)
         "fr": 150,  # French (Edge-TTS Henri/Denise ~145-155 WPM)
         "it": 155,  # Italian (Edge-TTS Diego/Elsa ~150-160 WPM)
-        "tr": 150,  # Turkish (Edge-TTS Ahmet/Emel ~145-155 WPM)
-        "de": 135,  # German (Edge-TTS Conrad/Katja ~130-140 WPM)
-        "ar": 130,  # Arabic (Edge-TTS Shakir/Hamed ~125-135 WPM)
-        "ru": 130,  # Russian (Edge-TTS Dmitry/Svetlana ~125-135 WPM)
+        "tr": 155,  # Turkish (Edge-TTS Ahmet/Emel ~150-160 WPM)
+        "de": 140,  # German (Edge-TTS Conrad/Katja ~135-145 WPM)
+        "ar": 145,  # Arabic (Edge-TTS Shakir/Hamed ~140-150 WPM)
+        "ru": 135,  # Russian (Edge-TTS Dmitry/Svetlana ~130-140 WPM)
         "th": 155,  # Thai (Edge-TTS Niwat/Premwadee ~150-160 WPM)
         "ja": 280,  # Japanese characters/min (Edge-TTS Keita/Nanami)
         "ko": 200,  # Korean blocks/min (Edge-TTS InJoon/SunHi)
@@ -967,10 +955,11 @@ class ScriptEngine:
 
     @staticmethod
     def calculate_target_words(duration_mins: int, voice_speed: str = "fast", target_lang: str = "en") -> int:
-        """Calculates spoken target word count dynamically based on duration, language pace, and speed."""
+        """Calculates spoken target word count dynamically based on duration, language pace, and speed without caps."""
         base_wpm = ScriptEngine.LANGUAGE_WPM.get(target_lang, 150)
         mult = ScriptEngine.SPEED_MULTIPLIER.get(voice_speed, 1.15)
-        return max(130, int(round(duration_mins * base_wpm * mult)))
+        d_mins = max(1, int(duration_mins)) if duration_mins else 5
+        return max(100, int(round(d_mins * base_wpm * mult)))
 
     @staticmethod
     def calculate_dynamic_pacing(source_duration_sec: float) -> Dict[str, Any]:
@@ -1002,13 +991,40 @@ class ScriptEngine:
         }
 
     @staticmethod
-    def partition_timeline(source_duration_sec: float, target_duration_mins: int = 10) -> List[Dict[str, Any]]:
+    def partition_timeline(
+        source_duration_sec: float,
+        target_duration_mins: int = 10,
+        dialogue_timeline: Optional[List[Dict[str, Any]]] = None
+    ) -> List[Dict[str, Any]]:
         """
-        Universal 5-Act Timeline Milestone Partitioner.
-        Proportionately divides source video duration (whether 40m or 180m) into 5 chronological acts
-        to ensure full 0% to 100% movie coverage with clear timestamp brackets and word budgets.
+        Universal 5-Act Timeline Milestone Partitioner with Smart Transcript-Driven Boundary Detection.
+        If dialogue_timeline is available, anchors the start boundary to the first spoken dialogue
+        (skipping empty intro logos and silence) and the end boundary to the final spoken dialogue
+        (preserving 100% of the climax while naturally omitting silent rolling credits).
         """
         total_sec = float(source_duration_sec) if source_duration_sec and source_duration_sec > 60 else float(target_duration_mins * 60 * 6)
+
+        start_boundary_s = 0.0
+        end_boundary_s = total_sec
+
+        if dialogue_timeline and len(dialogue_timeline) > 0:
+            first_cue_start = float(dialogue_timeline[0].get("start", 0.0))
+            last_cue_end = max((float(c.get("end", 0.0)) for c in dialogue_timeline), default=0.0)
+
+            # Intro guard: If first dialogue is after initial logos/silence, skip the blank intro
+            if first_cue_start > 15.0:
+                start_boundary_s = max(0.0, first_cue_start - 5.0)
+
+            # True climax guard: End boundary follows the last spoken dialogue + 15s scene resolution
+            if last_cue_end > 60.0:
+                end_boundary_s = min(total_sec, last_cue_end + 15.0)
+        else:
+            # Fallback if no dialogue timeline provided
+            if total_sec > 600:
+                credits_margin = max(120.0, min(total_sec * 0.065, 360.0))
+                end_boundary_s = max(300.0, total_sec - credits_margin)
+
+        active_story_sec = max(60.0, end_boundary_s - start_boundary_s)
 
         def sec_to_ts(s: float) -> str:
             m = int(s // 60)
@@ -1025,8 +1041,8 @@ class ScriptEngine:
 
         milestones = []
         for act_name, label, start_ratio, end_ratio, budget_pct in acts_def:
-            start_s = round(total_sec * start_ratio)
-            end_s = total_sec if end_ratio == 1.00 else round(total_sec * end_ratio)
+            start_s = round(start_boundary_s + active_story_sec * start_ratio)
+            end_s = round(end_boundary_s) if end_ratio == 1.00 else round(start_boundary_s + active_story_sec * end_ratio)
             milestones.append({
                 "act": act_name,
                 "label": label,
@@ -1096,7 +1112,8 @@ class ScriptEngine:
         spoiler_mode: str = "full_recap",
         voice_speed: str = "fast",
         source_video_duration_sec: float = 0,
-        story_beats: Optional[List[Dict[str, Any]]] = None
+        story_beats: Optional[List[Dict[str, Any]]] = None,
+        dialogue_timeline: Optional[List[Dict[str, Any]]] = None
     ) -> str:
         """Builds tailored, multi-act prompt blueprint for universal video genres with strict length quotas."""
         lang_info = SUPPORTED_LANGUAGES.get(target_lang, SUPPORTED_LANGUAGES["en"])
@@ -1207,7 +1224,7 @@ class ScriptEngine:
         else:
             transcript_section = "Source Transcript: None provided. Structure narrative from beginning to climax based on plot guide."
 
-        milestones = ScriptEngine.partition_timeline(source_video_duration_sec, duration_mins)
+        milestones = ScriptEngine.partition_timeline(source_video_duration_sec, duration_mins, dialogue_timeline=dialogue_timeline)
         milestone_lines = ["\nMANDATORY 5-ACT TIMELINE PROGRESSION (FULL MOVIE COVERAGE REQUIRED):"]
         milestone_lines.append("You MUST structure your narrative across these chronological acts and ensure your timestamps reach the final climax and ending:")
         for m in milestones:
@@ -1259,11 +1276,17 @@ NARRATIVE STRUCTURE:
 {cfg['structure']}
 
 FORMATTING & AI DIRECTOR REQUIREMENTS:
-1. SCENE TIMESTAMPS & DIALOGUE ANCHORING: For each narrative scene block, include a timestamp bracket mapping directly to the source movie/video timeline, e.g. [SCENE: 03:15 - 03:20] or [03:15 - 03:20].
-   - MANDATORY: Anchor your timestamps to the chronological Full-Movie Roadmap and 5-Act Milestones above!
+1. SCENE TIMESTAMPS & DIALOGUE ANCHORING: Every narrative scene block MUST strictly follow this exact structure:
+   [SCENE: MM:SS - MM:SS]
+   [DIALOGUE_REF: "exact quote or dialogue from source transcript/roadmap"]
+   [VOICEOVER]
+   Your narrative text here...
+
+   - MANDATORY DIALOGUE REFERENCE: You MUST include [DIALOGUE_REF: "..."] with the exact quote or phrase from the source transcript/roadmap that occurs at this moment. The video studio relies on this exact reference to lock the visual cut with 100% precision.
+   - Anchor your timestamps to the chronological Full-Movie Roadmap and 5-Act Milestones above!
    - Match your timestamps directly to the actual dialogues/events in the Roadmap. When narrating what a character says, or a major action (gunfire, chase, explosion, confrontation), use the real timestamp from the dialogue roadmap where that event happens.
    - Do NOT invent arbitrary or fictional timestamps. The video studio cuts the exact video footage at these timestamps to sync with your voiceover!
-   - Every scene MUST begin with [SCENE: MM:SS - MM:SS] followed immediately by [VOICEOVER].
+   - Every scene MUST begin with [SCENE: MM:SS - MM:SS] followed by [DIALOGUE_REF: "..."] and [VOICEOVER].
    - The scene timestamps MUST progress chronologically across the entire film from Act 1 (opening) through Act 2 (middle) to Act 3 (climax) and Epilogue (ending).
    - NEVER stay in the first 10 or 50 minutes of the movie. Visuals are auto-sliced from these exact timestamps!
 2. EMOTIONAL SFX CUES: At key emotional moments, insert sound cues inside brackets:
@@ -1294,7 +1317,8 @@ FORMATTING & AI DIRECTOR REQUIREMENTS:
         source_video_duration_sec: float = 0,
         story_beats: Optional[List[Dict[str, Any]]] = None,
         openai_api_key: Optional[str] = None,
-        ai_provider: str = "auto"
+        ai_provider: str = "auto",
+        dialogue_timeline: Optional[List[Dict[str, Any]]] = None
     ) -> Dict[str, Any]:
         """
         Generates a viral cinematic storytelling recap or universal explainer in any of the 15+ supported languages.
@@ -1330,7 +1354,8 @@ FORMATTING & AI DIRECTOR REQUIREMENTS:
             spoiler_mode=spoiler_mode,
             voice_speed=voice_speed,
             source_video_duration_sec=source_video_duration_sec,
-            story_beats=story_beats
+            story_beats=story_beats,
+            dialogue_timeline=dialogue_timeline
         )
 
         if format_mode == "reels_parts" and num_parts > 1:
@@ -1338,7 +1363,46 @@ FORMATTING & AI DIRECTOR REQUIREMENTS:
 Each part must begin with a powerful hook.
 Separate each part strictly with '===PART===' on its own line."""
 
-        # 0. Attempt generation via OpenAI ChatGPT (GPT-4o) if requested or available
+        # 0. Check if active provider is Gemini or Custom via ai_router
+        try:
+            from app.services.ai_router import load_ai_settings, generate_narrative_text
+            ai_cfg = load_ai_settings()
+            current_active = ai_cfg.get("active_provider", "9router")
+            if current_active in ("gemini", "custom"):
+                lang_info = SUPPORTED_LANGUAGES.get(target_lang, SUPPORTED_LANGUAGES["en"])
+                system_instruction = f"You are an elite, world-class viral YouTube movie & drama narrator and storyboard director in natural colloquial {lang_info['name']}."
+                gen_text = generate_narrative_text(prompt, system_prompt=system_instruction, max_tokens=4000)
+                if gen_text and len(gen_text.strip()) > 80:
+                    gen_text = ScriptEngine.strip_code_and_developer_artifacts(gen_text)
+                    gen_text = ScriptEngine.clamp_script_word_budget(
+                        gen_text.strip(),
+                        target_duration_mins=duration_mins,
+                        target_lang=target_lang,
+                        voice_speed=voice_speed
+                    )
+                    clean_narr_g, _, _ = ScriptEngine.parse_storyboard(gen_text)
+                    spoken_word_count_g = len(clean_narr_g.split()) if clean_narr_g else len(gen_text.split())
+                    hook_metrics_g = ScriptEngine.calculate_hook_score(gen_text, target_lang)
+                    p_model = ai_cfg["providers"][current_active].get("model", current_active)
+                    return {
+                        "success": True,
+                        "model": f"{current_active}:{p_model}",
+                        "script": gen_text.strip(),
+                        "language": target_lang,
+                        "genre": genre,
+                        "target_words": target_words,
+                        "actual_words": spoken_word_count_g,
+                        "raw_words": len(gen_text.split()),
+                        "hook_score": hook_metrics_g,
+                        "story_beats": story_beats or [],
+                        "format_mode": format_mode,
+                        "num_parts": num_parts,
+                        "audio_mode": audio_mode
+                    }
+        except Exception as e:
+            print(f"[AIRouter Dispatch Notice] {e}")
+
+        # 0b. Attempt generation via OpenAI ChatGPT (GPT-4o) if requested or available
         try:
             from app.services.openai_client import is_openai_available, call_chatgpt_llm, load_openai_settings
             cfg_oa = load_openai_settings()

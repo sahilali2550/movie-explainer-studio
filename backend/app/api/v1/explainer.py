@@ -53,37 +53,113 @@ def clear_logs_endpoint():
     EngineLogger.clear()
     return {"success": True}
 
+@router.post("/open-output-folder")
+def open_output_folder():
+    """Opens the local outputs storage directory in system file explorer."""
+    import platform, subprocess
+    folder = str(OUTPUTS_DIR)
+    try:
+        if platform.system() == "Windows":
+            os.startfile(folder)
+        elif platform.system() == "Darwin":
+            subprocess.run(["open", folder])
+        else:
+            subprocess.run(["xdg-open", folder])
+        return {"success": True, "folder": folder}
+    except Exception as e:
+        return {"success": False, "error": str(e), "folder": folder}
+
 @router.get("/ai-status")
 def get_ai_status():
     """Checks 9Router connection status and models availability."""
-    from app.services.nine_router_client import test_9router_connection, load_9router_settings
-    settings = load_9router_settings()
-    conn = test_9router_connection()
+    from app.services.ai_router import load_ai_settings, test_provider_connection
+    cfg = load_ai_settings()
+    active = cfg.get("active_provider", "9router")
+    p_info = cfg["providers"].get(active, {})
+    conn = test_provider_connection(active)
     return {
         "success": True,
         "online": conn.get("online", False),
+        "active_provider": active,
+        "active_combo": p_info.get("model", "new-combo"),
         "latency_ms": conn.get("latency_ms", 0),
-        "active_combo": conn.get("active_combo", "new-combo"),
         "models_count": conn.get("models_count", 0),
-        "url": conn.get("url", "http://127.0.0.1:20128/v1"),
+        "url": p_info.get("url", ""),
         "message": conn.get("message", "")
     }
 
+@router.get("/ai-config")
+def get_ai_config():
+    """Returns current AI configuration for all supported providers."""
+    from app.services.ai_router import load_ai_settings
+    cfg = load_ai_settings()
+    sanitized = json.loads(json.dumps(cfg))
+    for p_name, p_data in sanitized.get("providers", {}).items():
+        k = p_data.get("key", "")
+        if k:
+            p_data["key_masked"] = f"{k[:5]}...{k[-4:]}" if len(k) > 10 else "***"
+        else:
+            p_data["key_masked"] = ""
+    return sanitized
+
 @router.post("/ai-config")
 def update_ai_config(
-    url: str = Form(...),
-    combo_model: str = Form("new-combo"),
-    key: Optional[str] = Form(None)
+    provider: Optional[str] = Form(None),
+    url: Optional[str] = Form(None),
+    combo_model: Optional[str] = Form(None),
+    key: Optional[str] = Form(None),
+    nine_router_url: Optional[str] = Form(None),
+    nine_router_combo: Optional[str] = Form(None),
+    nine_router_key: Optional[str] = Form(None),
+    gemini_key: Optional[str] = Form(None),
+    gemini_model: Optional[str] = Form(None),
+    openai_key: Optional[str] = Form(None),
+    openai_model: Optional[str] = Form(None),
+    custom_url: Optional[str] = Form(None),
+    custom_key: Optional[str] = Form(None),
+    custom_model: Optional[str] = Form(None)
 ):
-    """Updates 9Router endpoint URL and combo model name."""
-    from app.services.nine_router_client import save_9router_settings, test_9router_connection
-    saved = save_9router_settings(url=url, combo_model=combo_model, key=key)
-    conn = test_9router_connection()
+    """Updates AI configuration for 9Router, Gemini, OpenAI, or Custom providers."""
+    from app.services.ai_router import save_ai_settings, test_provider_connection, load_ai_settings
+    if url is not None and nine_router_url is None:
+        nine_router_url = url
+    if combo_model is not None and nine_router_combo is None:
+        nine_router_combo = combo_model
+    if key is not None and nine_router_key is None and (not provider or provider == "9router"):
+        nine_router_key = key
+
+    saved = save_ai_settings(
+        provider=provider,
+        nine_router_url=nine_router_url,
+        nine_router_key=nine_router_key,
+        nine_router_combo=nine_router_combo,
+        gemini_key=gemini_key,
+        gemini_model=gemini_model,
+        openai_key=openai_key,
+        openai_model=openai_model,
+        custom_url=custom_url,
+        custom_key=custom_key,
+        custom_model=custom_model
+    )
+    active = load_ai_settings().get("active_provider", "9router")
+    conn = test_provider_connection(active)
     return {
         "success": saved,
+        "active_provider": active,
         "online": conn.get("online", False),
-        "message": conn.get("message", "Settings updated.")
+        "message": conn.get("message", "Settings updated successfully.")
     }
+
+@router.post("/test-ai-connection")
+def test_ai_connection_endpoint(
+    provider: str = Form("9router"),
+    url: Optional[str] = Form(None),
+    key: Optional[str] = Form(None),
+    model: Optional[str] = Form(None)
+):
+    """Tests connection to a specific AI provider on demand."""
+    from app.services.ai_router import test_provider_connection
+    return test_provider_connection(provider=provider, url=url, key=key, model=model)
 
 @router.get("/openai-status")
 def get_openai_status():
@@ -267,12 +343,14 @@ async def generate_script_endpoint(
     log_event(f"🧠 Script request received for '{movie_title}' [Genre: {genre}] in {language.upper()} ({persona}, Speed: {voice_speed})", "INFO")
 
     source_dur = 0.0
+    dialogue_timeline = []
     if custom_transcript and custom_transcript.strip():
         log_event(f"📋 Ingesting user-pasted transcript ({len(custom_transcript)} chars) directly...", "INFO")
         parsed_t = VideoEngine.parse_raw_transcript_text(custom_transcript)
         subs = parsed_t.get("subtitles_text", "")
         source_dur = float(parsed_t.get("total_duration", 0) or 0)
-        log_event(f"⚡ Instant transcript processed! {len(parsed_t.get('dialogue_timeline', []))} timed cues mapped. Bypassing YouTube download delay!", "SUCCESS")
+        dialogue_timeline = parsed_t.get("dialogue_timeline", [])
+        log_event(f"⚡ Instant transcript processed! {len(dialogue_timeline)} timed cues mapped. Bypassing YouTube download delay!", "SUCCESS")
     elif url and ("youtube.com" in url or "youtu.be" in url):
         log_event(f"🌐 Fetching metadata & subtitles from YouTube: {url[:50]}...", "INFO")
         info = VideoEngine.extract_youtube_info(url, str(TEMP_DIR), job_id)
@@ -280,6 +358,7 @@ async def generate_script_endpoint(
         desc = info.get("description", "")
         subs = info.get("subtitles_text", "")
         source_dur = float(info.get("duration", 0) or 0)
+        dialogue_timeline = info.get("dialogue_timeline", [])
         if subs:
             log_event(f"📝 Extracted {len(subs)} characters of dialogue transcripts & timeline milestones (Source: {round(source_dur/60, 1)}m)", "INFO")
 
@@ -315,7 +394,8 @@ async def generate_script_endpoint(
         genre=genre,
         source_video_duration_sec=source_dur,
         openai_api_key=openai_api_key,
-        ai_provider=ai_provider or "auto"
+        ai_provider=ai_provider or "auto",
+        dialogue_timeline=dialogue_timeline
     )
 
     raw_hook = result.get("hook_score", 0)
@@ -939,10 +1019,11 @@ async def render_batch_endpoint(
                         bgm_volume=0.16
                     )
 
-                    # Create SRT Subtitles file
+                    # Create SRT Subtitles file synchronized with exact speech cues
+                    loc_speech_cues = VoiceEngine.get_speech_cues(speech_path)
                     srt_filename = f"AutoExplainer_SUBS_{job_id}_{lang}.srt"
                     srt_path = str(OUTPUTS_DIR / srt_filename)
-                    SubtitleEngine.save_srt_file(localized_script, base_duration, srt_path)
+                    SubtitleEngine.save_srt_file(localized_script, base_duration, srt_path, timed_cues=loc_speech_cues)
 
                     # Thumbnails
                     thumbs = ThumbnailEngine.generate_3_thumbnail_options(
@@ -1558,15 +1639,4 @@ async def run_autopilot_endpoint(
                 try: os.remove(p)
                 except Exception: pass
 
-
-@router.post("/fetch-wikipedia-plot")
-async def fetch_wikipedia_plot_endpoint(payload: Dict[str, Any]):
-    title = payload.get("title", "")
-    if not title or not title.strip():
-        raise HTTPException(status_code=400, detail="Movie title is required.")
-
-    plot = ScriptEngine.fetch_wikipedia_plot(title)
-    if not plot:
-        return {"success": False, "message": f"No Wikipedia plot found for '{title}'.", "plot": ""}
-    return {"success": True, "title": title, "plot": plot}
 

@@ -36,10 +36,16 @@ class ThumbnailEngine:
         except Exception:
             pass
 
-        min_safe_t = max(10.0, dur * 0.16) if dur > 60.0 else 2.0
-        max_safe_t = min(dur - 10.0, dur * 0.82) if dur > 60.0 else max(2.0, dur - 2.0)
+        min_safe_t = max(10.0, dur * 0.15) if dur > 60.0 else 2.0
+        # Guard against closing credits roll at end of movies
+        if dur > 240.0:
+            max_safe_t = min(dur - 180.0, dur * 0.82)
+        elif dur > 60.0:
+            max_safe_t = min(dur - 30.0, dur * 0.82)
+        else:
+            max_safe_t = max(2.0, dur - 2.0)
 
-        safe_ratios = [0.22, 0.32, 0.48, 0.60, 0.74, 0.82]
+        safe_ratios = [0.22, 0.32, 0.48, 0.60, 0.72, 0.80]
         fallback_ts = [round(dur * p, 2) for p in safe_ratios]
 
         if target_timestamps:
@@ -71,16 +77,48 @@ class ThumbnailEngine:
     @staticmethod
     def calculate_sharpness(img_path: str) -> float:
         """
-        Estimates image sharpness using edge detection filter standard deviation.
+        Estimates candidate frame quality & sharpness for high-CTR YouTube thumbnail feeds.
+        Combines edge detection variance with dynamic contrast and color saturation,
+        while heavily penalizing murky dark frames or blown-out white screens.
         """
         try:
             with Image.open(img_path) as im:
-                im_gray = im.convert("L").resize((320, 180))
+                im_rgb = im.convert("RGB").resize((320, 180))
+                im_gray = im_rgb.convert("L")
+
+                # 1. Edge Sharpness
                 edges = im_gray.filter(ImageFilter.FIND_EDGES)
-                stat = edges.histogram()
-                mean = sum(i * n for i, n in enumerate(stat)) / sum(stat)
-                variance = sum((i - mean) ** 2 * n for i, n in enumerate(stat)) / sum(stat)
-                return math.sqrt(variance)
+                stat_e = edges.histogram()
+                tot_e = max(1, sum(stat_e))
+                mean_e = sum(i * n for i, n in enumerate(stat_e)) / tot_e
+                var_e = sum((i - mean_e) ** 2 * n for i, n in enumerate(stat_e)) / tot_e
+                sharpness = math.sqrt(var_e)
+
+                # 2. Dynamic Contrast & Luminance Check
+                stat_g = im_gray.histogram()
+                tot_g = max(1, sum(stat_g))
+                mean_lum = sum(i * n for i, n in enumerate(stat_g)) / tot_g
+                var_lum = sum((i - mean_lum) ** 2 * n for i, n in enumerate(stat_g)) / tot_g
+                contrast = math.sqrt(var_lum)
+
+                # Penalize murky dark scenes (<30) or blown-out white screens (>230)
+                if mean_lum < 30:
+                    lum_factor = max(0.08, mean_lum / 30.0)
+                elif mean_lum > 230:
+                    lum_factor = max(0.08, (255.0 - mean_lum) / 25.0)
+                else:
+                    lum_factor = 1.0
+
+                # 3. Color Saturation (HSV S channel)
+                im_hsv = im_rgb.convert("HSV")
+                _, s_chan, _ = im_hsv.split()
+                stat_s = s_chan.histogram()
+                tot_s = max(1, sum(stat_s))
+                mean_sat = sum(i * n for i, n in enumerate(stat_s)) / tot_s
+                sat_bonus = 1.0 + min(0.6, (mean_sat / 255.0) * 0.8)
+
+                quality_score = (sharpness ** 0.85) * (max(1.0, contrast) ** 0.25) * sat_bonus * lum_factor
+                return float(quality_score)
         except Exception:
             return 0.0
 
@@ -324,6 +362,35 @@ class ThumbnailEngine:
         total_text_h = sum(line_heights) + (len(final_render_lines) - 1) * int(current_font_size * 0.25)
         start_y = h - total_text_h - int(h * 0.08)
 
+        # High-contrast backing plate (semi-transparent dark pill container) behind each text line
+        overlay = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+        draw_ov = ImageDraw.Draw(overlay)
+
+        curr_y = start_y
+        for idx, l in enumerate(final_render_lines):
+            try:
+                b = draw.textbbox((0, 0), l, font=font)
+                lw = b[2] - b[0]
+                lh = b[3] - b[1]
+            except Exception:
+                lw = int(w * 0.5)
+                lh = int(current_font_size)
+            lx = (w - lw) // 2
+
+            pad_x = max(16, int(current_font_size * 0.35))
+            pad_y = max(8, int(current_font_size * 0.16))
+            box_x0 = max(0, lx - pad_x)
+            box_y0 = max(0, curr_y - pad_y)
+            box_x1 = min(w, lx + lw + pad_x)
+            box_y1 = min(h, curr_y + lh + pad_y)
+
+            # Rounded dark plate container with ~85% opacity (alpha 215)
+            draw_ov.rounded_rectangle([(box_x0, box_y0), (box_x1, box_y1)], radius=12, fill=(0, 0, 0, 215))
+            curr_y += line_heights[idx] + int(current_font_size * 0.25)
+
+        img = Image.alpha_composite(img.convert("RGBA"), overlay).convert("RGB")
+        draw = ImageDraw.Draw(img)
+
         curr_y = start_y
         stroke_w = max(4, int(current_font_size * 0.11))
         text_color = (255, 230, 0) if "!" in display_text or "?" in display_text else (255, 255, 255)
@@ -371,6 +438,70 @@ class ThumbnailEngine:
                 pass
 
         return img
+
+    @staticmethod
+    def get_default_viral_hooks(lang: str = "en", title: str = "") -> List[str]:
+        """
+        Returns high-CTR viral thumbnail hooks tailored to the target language and context.
+        """
+        lang = (lang or "en").lower().strip()
+        HOOKS_BY_LANG = {
+            "ur": [
+                "یہ کیا ہو گیا؟!",
+                "سب سے بڑا خوفناک سچ!",
+                "کوئی یقین نہیں کرے گا!"
+            ],
+            "hi": [
+                "यह क्या हो गया?!",
+                "सबसे बड़ा खौफनाक सच!",
+                "कोई यकीन नहीं करेगा!"
+            ],
+            "ar": [
+                "ما الذي حدث؟!",
+                "الحقيقة الصادمة!",
+                "نهاية غير متوقعة!"
+            ],
+            "es": [
+                "¡EL GIRO INESPERADO!",
+                "¡LA VERDAD OCULTA!",
+                "¡NADIE LO ESPERABA!"
+            ],
+            "tr": [
+                "BEKLENMEDİK SON!",
+                "ŞOK EDİCİ GERÇEK!",
+                "KİMSE BUNU BEKLEMİYORDU!"
+            ],
+            "ru": [
+                "НЕОЖИДАННЫЙ ПОВОРОТ!",
+                "ШОКИРУЮЩАЯ ПРАВДА!",
+                "НИКТО НЕ ОЖИДАЛ!"
+            ],
+            "fr": [
+                "LE REBONDISSEMENT CHOC !",
+                "LA TERRIFIANTE VÉRITÉ !",
+                "PERSONNE NE S'Y ATTENDAIT !"
+            ],
+            "de": [
+                "DER SCHOCKIERENDE TWIST!",
+                "DIE DÜSTERE WAHRHEIT!",
+                "NIEMAND HAT DAS ERWARTET!"
+            ],
+            "id": [
+                "PLOT TWIST MENGEJUTKAN!",
+                "KEBENARAN YANG MENGERIKAN!",
+                "TIDAK ADA YANG MENDUGA!"
+            ],
+            "pt": [
+                "A REVIRAVOLTA CHOCANTE!",
+                "A VERDADE ASSUSTADORA!",
+                "NINGUÉM ESPERAVA POR ISSO!"
+            ]
+        }
+        return HOOKS_BY_LANG.get(lang, [
+            "THE SHOCKING TWIST!",
+            "THE TERRIFYING TRUTH!",
+            "NOBODY SAW THIS COMING!"
+        ])
 
     @staticmethod
     def generate_viral_thumbnails(
@@ -447,7 +578,7 @@ class ThumbnailEngine:
                 from app.services.nine_router_client import generate_movie_specific_hooks
                 hooks = generate_movie_specific_hooks(title=movie_title, plot_summary=plot_summary, lang=lang)
             except Exception:
-                hooks = ["THE SHOCKING TWIST!", "THE TRUTH REVEALED!", "NOBODY SAW THIS COMING!"]
+                hooks = ThumbnailEngine.get_default_viral_hooks(lang=lang, title=movie_title)
 
         yt_thumb_path = None
         if youtube_url:

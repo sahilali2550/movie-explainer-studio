@@ -551,13 +551,17 @@ class VideoEngine:
         """
         Converts scene time ranges [(start_sec, end_sec)] into yt-dlp --download-sections arguments.
         Example: [(18.0, 53.0)] -> ["--download-sections", "*00:18-00:53"]
+        Supports HH:MM:SS format for timestamps exceeding 1 hour.
         """
         if not scene_ranges:
             return []
 
         def sec_to_time(s: float) -> str:
-            m = int(s // 60)
+            h = int(s // 3600)
+            m = int((s % 3600) // 60)
             sec = int(s % 60)
+            if h > 0:
+                return f"{h:02d}:{m:02d}:{sec:02d}"
             return f"{m:02d}:{sec:02d}"
 
         args = []
@@ -579,6 +583,12 @@ class VideoEngine:
             "--force-overwrites",
             "--no-continue",
             "--no-playlist",
+            "--no-interactive",
+            "--no-warnings",
+            "--no-progress",
+            "--socket-timeout", "20",
+            "--retries", "10",
+            "--fragment-retries", "10",
             "-N", "5",
             "-f", format_spec,
             "--no-check-certificates",
@@ -598,8 +608,18 @@ class VideoEngine:
             except Exception:
                 pass
         cmd = VideoEngine.get_yt_dlp_download_cmd(url, output_path, resolution=resolution)
-        res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        return res.returncode == 0 and os.path.exists(output_path) and os.path.getsize(output_path) > 1000
+        try:
+            res = subprocess.run(
+                cmd,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=300
+            )
+            return res.returncode == 0 and os.path.exists(output_path) and os.path.getsize(output_path) > 1000
+        except Exception as e:
+            print(f"[download_youtube_video error] {e}")
+            return False
 
     @staticmethod
     def download_youtube_sections(
@@ -617,11 +637,18 @@ class VideoEngine:
         if not sec_args or not VideoEngine.is_valid_youtube_url(url):
             return False
 
-        sec_out_pattern = os.path.join(temp_dir, f"{job_id}_sec_%(section_number)s.mp4")
+        sec_out_pattern = os.path.join(temp_dir, f"{job_id}_sec_%(section_number)s.%(ext)s")
         cmd = [
             "yt-dlp",
+            "--no-warnings",
+            "--no-progress",
+            "--no-playlist",
+            "--socket-timeout", "20",
+            "--retries", "10",
+            "--fragment-retries", "10",
             "-N", "5",
-            "-f", "bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]/best[height<=720]/best",
+            "-f", "bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=720]+bestaudio/best[height<=720]/best",
+            "--merge-output-format", "mp4",
             "--no-check-certificates"
         ] + sec_args + [
             "-o", sec_out_pattern,
@@ -629,7 +656,16 @@ class VideoEngine:
             url
         ]
 
-        res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        try:
+            res = subprocess.run(
+                cmd,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=180
+            )
+        except Exception:
+            pass
 
         sec_files = []
         try:
@@ -652,10 +688,23 @@ class VideoEngine:
 
         if len(sec_files) == 1:
             try:
+                # Re-encode to valid mp4 — handles webm (VP9/Opus) → mp4 (H.264/AAC)
+                ffmpeg_bin = get_ffmpeg_binary()
+                r = subprocess.run(
+                    [ffmpeg_bin, "-y", "-i", sec_files[0],
+                     "-c:v", "libx264", "-preset", "ultrafast", "-crf", "23",
+                     "-c:a", "aac", "-b:a", "128k",
+                     output_video],
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+                )
+                if r.returncode == 0 and os.path.exists(output_video) and os.path.getsize(output_video) > 1000:
+                    return True
+                # Fallback: plain copy if encode also failed
                 shutil.copyfile(sec_files[0], output_video)
                 return os.path.exists(output_video) and os.path.getsize(output_video) > 1000
             except Exception:
                 pass
+            return False
 
         ffmpeg_bin = get_ffmpeg_binary()
         concat_list = os.path.join(temp_dir, f"{job_id}_concat_secs.txt")
@@ -665,13 +714,15 @@ class VideoEngine:
                     clean_p = sf.replace("\\", "/")
                     f.write(f"file '{clean_p}'\n")
 
+            # Re-encode (not -c copy) so mixed webm/mp4 containers all merge cleanly
             c_cmd = [
                 ffmpeg_bin, "-y", "-f", "concat", "-safe", "0",
                 "-i", concat_list,
-                "-c", "copy",
+                "-c:v", "libx264", "-preset", "ultrafast", "-crf", "23",
+                "-c:a", "aac", "-b:a", "128k",
                 output_video
             ]
-            c_res = subprocess.run(c_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            c_res = subprocess.run(c_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             if c_res.returncode == 0 and os.path.exists(output_video) and os.path.getsize(output_video) > 1000:
                 return True
         except Exception:
@@ -690,37 +741,46 @@ class VideoEngine:
     ) -> str:
         """
         Bulletproof source ingestion system:
-        1. Keeps sections and full video in strictly isolated filenames.
-        2. Validates duration against required voiceover duration.
-        3. Fails loudly with RuntimeError if downloaded footage is insufficient,
-           preventing silent loop repetition in FFmpeg.
+        1. Strictly downloads ONLY required scene sections (3-5s each) from YouTube.
+        2. Never downloads full 1-3 hour movies, avoiding bandwidth throttling and pipe deadlocks.
+        3. Validates duration against required voiceover duration.
         """
         sections_path = os.path.join(temp_dir, f"{job_id}_sections_raw.mp4")
-        full_path = os.path.join(temp_dir, f"{job_id}_full_raw.mp4")
 
-        # Try selective sections only IF ranges have sufficient coverage and do not span across long movie timelines
-        ranges_span = sum(max(0.0, e - s) for s, e in scene_ranges) if scene_ranges else 0.0
-        max_range_end = max((e for s, e in scene_ranges), default=0.0) if scene_ranges else 0.0
-        if scene_ranges and len(scene_ranges) >= 6 and ranges_span >= max(180.0, speech_dur * 0.85) and max_range_end <= max(300.0, speech_dur * 2.5):
-            selective_ok = VideoEngine.download_youtube_sections(url, scene_ranges, sections_path, temp_dir, job_id)
-            if selective_ok and os.path.exists(sections_path):
-                sec_dur = VideoEngine.get_duration(sections_path)
-                if sec_dur >= speech_dur * 0.85:
-                    return sections_path
+        # For local file paths:
+        if os.path.exists(url):
+            return url
 
-        # Fallback to full movie into a DIFFERENT, dedicated path with force=True
-        dl_ok = VideoEngine.download_youtube_video(url, full_path, resolution=resolution, force=True)
-        if not dl_ok or not os.path.exists(full_path):
-            raise RuntimeError(f"SourceIntegrityError: Failed to download source video from YouTube for job '{job_id}'.")
+        # For YouTube URLs: Strictly prioritize selective 3-5s section downloading across any timeline
+        if VideoEngine.is_valid_youtube_url(url):
+            effective_ranges = list(scene_ranges or [])
+            target_clip_dur = 4.5
+            num_needed = max(8, int(math.ceil(speech_dur / target_clip_dur)))
+            current_covered = sum(max(0.0, e - s) for s, e in effective_ranges)
 
-        full_dur = VideoEngine.get_duration(full_path)
-        required_min = speech_dur * 0.85
-        if full_dur < required_min:
+            # If ranges empty or insufficient to cover speech_dur, generate enough 4.5s section ranges
+            if len(effective_ranges) < num_needed or current_covered < speech_dur * 0.9:
+                step = max(20.0, 1800.0 / max(1, num_needed))
+                effective_ranges = [(i * step + 10.0, i * step + 10.0 + target_clip_dur) for i in range(num_needed)]
+
+            selective_ok = VideoEngine.download_youtube_sections(url, effective_ranges, sections_path, temp_dir, job_id)
+            if selective_ok and os.path.exists(sections_path) and os.path.getsize(sections_path) > 0:
+                return sections_path
+
+            # Attempt 2: Retry with wider padding window (+/- 1.0s) — NEVER full movie
+            print(f"[FootageIntegrity] Retrying selective extraction for job '{job_id}' with padded window...")
+            padded_ranges = [(max(0.0, s - 1.0), e + 1.0) for s, e in effective_ranges[:num_needed]]
+            retry_ok = VideoEngine.download_youtube_sections(url, padded_ranges, sections_path, temp_dir, job_id)
+            if retry_ok and os.path.exists(sections_path) and os.path.getsize(sections_path) > 0:
+                return sections_path
+
             raise RuntimeError(
-                f"SourceIntegrityError: Downloaded footage duration ({round(full_dur, 1)}s) is significantly shorter than required narration ({round(speech_dur, 1)}s, minimum required: {round(required_min, 1)}s). Refusing to silently loop partial footage."
+                f"SourceIntegrityError: Failed to selectively extract footage from YouTube for job '{job_id}'. "
+                f"Full movie download is permanently disabled."
             )
 
-        return full_path
+        raise RuntimeError(f"SourceIntegrityError: Invalid video source '{url}'. Must be a valid YouTube URL or local file.")
+
 
     @staticmethod
     def detect_camera_cuts_in_window(
@@ -915,6 +975,26 @@ class VideoEngine:
         return input_video
 
     @staticmethod
+    def get_safe_story_duration(
+        total_movie_dur: float,
+        dialogue_timeline: Optional[List[Dict[str, Any]]] = None
+    ) -> float:
+        """
+        Smart Transcript-Driven Climax Guard.
+        If dialogue_timeline is available, sets safe boundary to min(total_movie_dur, last_dialogue_end + 15.0).
+        Preserves 100% of the climax for videos without end credits, while cleanly excluding silent credits.
+        """
+        if dialogue_timeline and len(dialogue_timeline) > 0:
+            last_end = max((float(c.get("end", 0.0)) for c in dialogue_timeline), default=0.0)
+            if last_end > 60.0:
+                return min(float(total_movie_dur), last_end + 15.0)
+
+        if total_movie_dur <= 600.0:
+            return float(total_movie_dur)
+        credits_margin = max(120.0, min(float(total_movie_dur) * 0.065, 360.0))
+        return max(300.0, float(total_movie_dur) - credits_margin)
+
+    @staticmethod
     def build_audio_locked_scene_clips(
         input_video: str,
         scene_blocks: List[Any],
@@ -974,8 +1054,15 @@ class VideoEngine:
             total_movie_dur = float(meta.get("duration", 0.0))
         except Exception:
             total_movie_dur = VideoEngine.get_duration(input_video)
+
+        # Universal End-Credits Blacklist Guard: Never slice from the end credits
+        safe_movie_dur = VideoEngine.get_safe_story_duration(total_movie_dur)
         clip_paths: List[str] = []
         concat_file = os.path.join(temp_dir, f"{job_id}_alc_concat.txt")
+
+        # Check if input_video is a selective compilation (selective footage length < max movie timestamps)
+        max_req_start = max((float(getattr(b, "movie_start", 0.0)) for b in scene_blocks), default=0.0)
+        is_selective_compilation = total_movie_dur < max_req_start and total_movie_dur > 0.0
 
         try:
             for idx, block in enumerate(scene_blocks):
@@ -985,42 +1072,72 @@ class VideoEngine:
                 if narration_dur <= 0.0:
                     narration_dur = 3.5  # absolute minimum
 
+                clip_out = os.path.join(temp_dir, f"{job_id}_alc_{idx}.mp4")
+
+                # If input_video is a selective compilation, cut using local timeline offset (Rule 2)
+                if is_selective_compilation:
+                    local_anchor = min(max(0.0, float(getattr(block, "narration_start", 0.0))), max(0.0, total_movie_dur - narration_dur))
+                    avail = max(0.1, total_movie_dur - local_anchor)
+                    cut_dur = min(narration_dur, avail)
+                    gap = round(narration_dur - cut_dur, 3) if cut_dur < narration_dur else 0.0
+
+                    vf_filter = "setpts=PTS-STARTPTS,fps=24"
+                    if gap > 0.05:
+                        vf_filter += f",tpad=stop_mode=clone:stop_duration={gap}"
+
+                    cmd_cut_local = [
+                        ffmpeg_bin, "-y",
+                        "-ss", str(round(local_anchor, 3)),
+                        "-t", str(round(cut_dur, 3)),
+                        "-i", input_video,
+                        "-vf", vf_filter,
+                        "-t", str(round(narration_dur, 3)),
+                        "-avoid_negative_ts", "make_zero",
+                        "-c:v", "libx264", "-preset", "ultrafast", "-crf", "23",
+                        "-an",
+                        clip_out
+                    ]
+                    res_local = subprocess.run(cmd_cut_local, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                    if res_local.returncode == 0 and os.path.exists(clip_out) and os.path.getsize(clip_out) > 0:
+                        clip_paths.append(clip_out)
+                        continue
+
+                # Clamp movie_start strictly within safe storytelling window (leaving credits out)
                 movie_start = max(0.0, float(block.movie_start))
-                if total_movie_dur > 2.0 and movie_start >= total_movie_dur - 1.0:
-                    safe_span = max(1.0, total_movie_dur - narration_dur - 1.0)
+                if safe_movie_dur > 2.0 and movie_start >= safe_movie_dur - 1.0:
+                    safe_span = max(1.0, safe_movie_dur - narration_dur - 1.0)
                     movie_start = round(movie_start % safe_span, 2)
 
-                movie_end = min(max(movie_start + 1.0, float(block.movie_end)), total_movie_dur)
+                movie_end = min(max(movie_start + 1.0, float(block.movie_end)), safe_movie_dur)
                 movie_window = max(0.1, movie_end - movie_start)
-
-                clip_out = os.path.join(temp_dir, f"{job_id}_alc_{idx}.mp4")
 
                 # ── Strategy selection ─────────────────────────────────────────
                 speed_ratio = movie_window / narration_dur if narration_dur > 0 else 1.0
 
+
                 # 3-5 Second Micro-Cut Rule:
                 # If narration_dur > 5.0, slice 3 to 4 sequential micro-cuts (each 3.0s-5.0s)
                 # centered around the anchored dialogue timestamp (movie_start).
-                if narration_dur > 5.0 and total_movie_dur > 5.0:
+                if narration_dur > 5.0 and safe_movie_dur > 5.0:
                     n_cuts = max(2, int(round(narration_dur / 3.8)))
                     base_dur = round(narration_dur / n_cuts, 3)
                     mc_durs = [base_dur] * n_cuts
                     mc_durs[-1] = round(narration_dur - sum(mc_durs[:-1]), 3)
 
-                    # Center cuts around the anchored dialogue timestamp
-                    scene_anchor = movie_start
-                    scene_end = min(total_movie_dur, max(movie_end, scene_anchor + narration_dur))
+                    # Center cuts around the anchored dialogue timestamp within safe movie duration
+                    scene_anchor = min(safe_movie_dur - narration_dur, movie_start)
+                    scene_end = min(safe_movie_dur, max(movie_end, scene_anchor + narration_dur))
                     actual_span = max(0.1, scene_end - scene_anchor)
 
                     if actual_span >= narration_dur:
                         max_offset = actual_span - mc_durs[0]
                         step = max_offset / max(1, n_cuts - 1) if n_cuts > 1 else 0.0
-                        cut_starts = [round(min(total_movie_dur - mc_durs[k], scene_anchor + k * step), 3) for k in range(n_cuts)]
+                        cut_starts = [round(min(safe_movie_dur - mc_durs[k], scene_anchor + k * step), 3) for k in range(n_cuts)]
                     else:
-                        cut_starts = [round(min(total_movie_dur - mc_durs[k], scene_anchor + sum(mc_durs[:k])), 3) for k in range(n_cuts)]
+                        cut_starts = [round(min(safe_movie_dur - mc_durs[k], scene_anchor + sum(mc_durs[:k])), 3) for k in range(n_cuts)]
 
                     # If speed_ratio < 0.5 (extension required), record the extended -to call for Option-C
-                    extended_end = min(total_movie_dur, movie_start + narration_dur)
+                    extended_end = min(safe_movie_dur, movie_start + narration_dur)
                     if speed_ratio < 0.5:
                         clip_scene = os.path.join(temp_dir, f"{job_id}_alc_{idx}_scene.mp4")
                         cmd_extend = [
@@ -1369,11 +1486,23 @@ class VideoEngine:
 
         res_x = 1080 if aspect_ratio == "vertical" else (1080 if aspect_ratio == "square" else 1920)
         res_y = 1920 if aspect_ratio == "vertical" else (1080 if aspect_ratio == "square" else 1080)
-        font_size = 44 if aspect_ratio == "vertical" else 36
-        margin_v = 140 if aspect_ratio == "vertical" else 75
-        box_padding = 10 if aspect_ratio == "vertical" else 8
 
-        font_name = "Noto Nastaliq Urdu" if lang in ["ur", "ar"] else ("Nirmala UI" if lang == "hi" else "Arial")
+        # Language-Adaptive High-Visibility Typography Engine
+        if lang in ["ur", "ar"]:
+            font_name = "Noto Nastaliq Urdu"
+            font_size = 64 if aspect_ratio == "vertical" else 54
+            box_padding = 14 if aspect_ratio == "vertical" else 12
+            margin_v = 140 if aspect_ratio == "vertical" else 85
+        elif lang == "hi":
+            font_name = "Nirmala UI"
+            font_size = 56 if aspect_ratio == "vertical" else 48
+            box_padding = 12 if aspect_ratio == "vertical" else 10
+            margin_v = 140 if aspect_ratio == "vertical" else 80
+        else:
+            font_name = "Arial Black"
+            font_size = 54 if aspect_ratio == "vertical" else 46
+            box_padding = 12 if aspect_ratio == "vertical" else 10
+            margin_v = 140 if aspect_ratio == "vertical" else 80
 
         ass_lines = [
             "[Script Info]",

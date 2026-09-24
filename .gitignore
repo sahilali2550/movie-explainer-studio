@@ -16,9 +16,13 @@ __pycache__/
 !.env.example
 !backend/.env.example
 config/9router_settings.json
+config/ai_settings.json
+config/openai_settings.json
+backend/config/
 config/youtube_credentials.json
 config/youtube_channels.json
 !config/youtube_credentials.json.example
+*.backup.*
 *.key
 *.pem
 *.cert

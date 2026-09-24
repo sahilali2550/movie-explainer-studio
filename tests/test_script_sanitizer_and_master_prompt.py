@@ -62,28 +62,3 @@ def test_build_prompt_includes_master_prompt_principles():
     assert "conversational" in prompt.lower() or "friend" in prompt.lower()
     # Conclusion / Short Review
     assert "conclusion" in prompt.lower() or "review" in prompt.lower() or "takeaway" in prompt.lower()
-
-
-@patch("urllib.request.urlopen")
-def test_fetch_wikipedia_plot(mock_urlopen):
-    # Mock Wikipedia API response
-    sample_json = b'''{
-        "query": {
-            "pages": {
-                "12345": {
-                    "title": "Cold Skin (film)",
-                    "extract": "<h3>Plot</h3><p>In 1914, a young Irishman arrives at a remote subantarctic island to work as a weather observer. He discovers the previous observer is dead and Grunor, a lighthouse keeper, is battling amphibious humanoids every night.</p><h3>Cast</h3>"
-                }
-            }
-        }
-    }'''
-    mock_resp = MagicMock()
-    mock_resp.read.return_value = sample_json
-    mock_resp.__enter__.return_value = mock_resp
-    mock_urlopen.return_value = mock_resp
-
-    plot = ScriptEngine.fetch_wikipedia_plot("Cold Skin")
-    assert plot is not None
-    assert "weather observer" in plot
-    assert "amphibious humanoids" in plot
-    assert "<h3>" not in plot

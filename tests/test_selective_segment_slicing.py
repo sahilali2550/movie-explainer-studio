@@ -66,6 +66,5 @@ def test_download_youtube_sections_execution():
 
         assert ok is True
         assert mock_run.called
-        called_cmd = mock_run.call_args[0][0]
-        assert "--download-sections" in called_cmd
+        assert any("--download-sections" in call_args[0][0] for call_args in mock_run.call_args_list)
 

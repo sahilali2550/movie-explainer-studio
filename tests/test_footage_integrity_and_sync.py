@@ -78,17 +78,13 @@ def test_ensure_footage_integrity_fallback_to_full_raw(tmp_path):
     full_raw_file = tmp_path / "job2_full_raw.mp4"
     full_raw_file.write_bytes(b"full video content")
 
-    scene_ranges = [(0.0, 20.0)]  # Only 20s
-    speech_dur = 120.0           # Needs at least 102s (85%)
+    scene_ranges = [(0.0, 20.0)]
+    speech_dur = 120.0
 
-    def mock_get_duration(path):
-        if "sections_raw" in str(path):
-            return 20.0
-        return 600.0  # Full raw has 600s
-
+    # Test 1: When selective download succeeds, it returns sections_raw without calling download_youtube_video
     with patch("app.services.video_engine.VideoEngine.download_youtube_sections", return_value=True), \
-         patch("app.services.video_engine.VideoEngine.download_youtube_video", return_value=True), \
-         patch("app.services.video_engine.VideoEngine.get_duration", side_effect=mock_get_duration):
+         patch("app.services.video_engine.VideoEngine.download_youtube_video") as mock_full_dl, \
+         patch("app.services.video_engine.VideoEngine.get_duration", return_value=120.0):
         
         result_path = VideoEngine.ensure_footage_integrity(
             url="https://youtube.com/watch?v=mock",
@@ -98,23 +94,22 @@ def test_ensure_footage_integrity_fallback_to_full_raw(tmp_path):
             resolution="720p",
             scene_ranges=scene_ranges
         )
-        assert result_path == str(full_raw_file)
+        assert result_path == str(sections_file)
+        # CRITICAL INVARIANT: download_youtube_video must NEVER be called
+        assert not mock_full_dl.called
 
 
-def test_ensure_footage_integrity_raises_on_deficient_footage(tmp_path):
-    """Verify that if footage is severely deficient even after full download, it fails loudly."""
-    sections_file = tmp_path / "job3_sections_raw.mp4"
-    sections_file.write_bytes(b"short")
-    full_raw_file = tmp_path / "job3_full_raw.mp4"
-    full_raw_file.write_bytes(b"also short")
-
+def test_ensure_footage_integrity_never_downloads_full_movie_on_failure(tmp_path):
+    """
+    CRITICAL REGRESSION TEST (Section 41):
+    Verifies that if selective extraction fails, ensure_footage_integrity NEVER triggers
+    a full-movie download and fails loudly with SourceIntegrityError.
+    """
     scene_ranges = [(0.0, 15.0)]
     speech_dur = 180.0
 
-    # Both return only 15s
-    with patch("app.services.video_engine.VideoEngine.download_youtube_sections", return_value=True), \
-         patch("app.services.video_engine.VideoEngine.download_youtube_video", return_value=True), \
-         patch("app.services.video_engine.VideoEngine.get_duration", return_value=15.0):
+    with patch("app.services.video_engine.VideoEngine.download_youtube_sections", return_value=False), \
+         patch("app.services.video_engine.VideoEngine.download_youtube_video") as mock_full_dl:
         
         with pytest.raises(RuntimeError) as excinfo:
             VideoEngine.ensure_footage_integrity(
@@ -126,7 +121,9 @@ def test_ensure_footage_integrity_raises_on_deficient_footage(tmp_path):
                 scene_ranges=scene_ranges
             )
         assert "SourceIntegrityError" in str(excinfo.value)
-        assert "significantly shorter" in str(excinfo.value)
+        assert "Full movie download is permanently disabled" in str(excinfo.value)
+        assert not mock_full_dl.called
+
 
 
 def test_detect_camera_cuts_in_window(tmp_path):
