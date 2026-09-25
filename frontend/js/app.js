@@ -2,6 +2,29 @@
 
 const $ = id => document.getElementById(id);
 
+// SECURITY: attach the server-injected API token to every /api/* call.
+// window.__API_TOKEN__ is set by the backend when it serves index.html.
+(function () {
+  const _fetch = window.fetch.bind(window);
+  window.fetch = function (url, opts) {
+    opts = opts || {};
+    if (typeof url === "string" && url.indexOf("/api/") === 0 && window.__API_TOKEN__) {
+      const headers = new Headers(opts.headers || {});
+      headers.set("X-API-Token", window.__API_TOKEN__);
+      opts.headers = headers;
+    }
+    return _fetch(url, opts);
+  };
+})();
+
+function apiUrlWithToken(url) {
+  if (window.__API_TOKEN__ && url.indexOf("/api/") === 0) {
+    const sep = url.indexOf("?") === -1 ? "?" : "&";
+    return url + sep + "token=" + encodeURIComponent(window.__API_TOKEN__);
+  }
+  return url;
+}
+
 function escapeHtml(str) {
   if (str === null || str === undefined) return '';
   return String(str)
@@ -1271,7 +1294,7 @@ function showBatchResultsHub(results, zipUrl) {
 
   const zipBtn = $('btn-download-bundle-zip');
   if (zipBtn && zipUrl) {
-    zipBtn.href = zipUrl;
+    zipBtn.href = apiUrlWithToken(zipUrl);
     zipBtn.style.display = 'inline-flex';
   }
 

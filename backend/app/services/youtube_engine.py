@@ -161,7 +161,8 @@ def build_video_insert_body(
 def get_authorization_url(
     client_id: Optional[str] = None,
     client_secret: Optional[str] = None,
-    redirect_uri: str = "http://localhost:8000/api/v1/youtube/oauth-callback"
+    redirect_uri: str = "http://localhost:8000/api/v1/youtube/oauth-callback",
+    state: Optional[str] = None,
 ) -> str:
     """Generate Google OAuth 2.0 authorization URL."""
     from google_auth_oauthlib.flow import Flow
@@ -185,11 +186,14 @@ def get_authorization_url(
     flow = Flow.from_client_config(client_config, scopes=YOUTUBE_SCOPES)
     flow.redirect_uri = redirect_uri
     
-    auth_url, _ = flow.authorization_url(
+    auth_kwargs = dict(
         access_type="offline",
         include_granted_scopes="true",
-        prompt="consent"
+        prompt="consent",
     )
+    if state:
+        auth_kwargs["state"] = state
+    auth_url, _ = flow.authorization_url(**auth_kwargs)
     return auth_url
 
 def exchange_code_for_tokens(

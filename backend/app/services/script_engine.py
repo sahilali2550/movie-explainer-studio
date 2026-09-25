@@ -1596,7 +1596,7 @@ TASK: Elaborate, expand and enrich the story across Act 1, Act 2, and Act 3 with
                     continue
 
         # 3. Fallback multi-language template generator
-        fallback_text = ScriptEngine._generate_fallback_script(title, target_lang, mood, persona)
+        fallback_text = ScriptEngine._generate_fallback_script(title, target_lang, mood, persona, duration_mins)
         hook_metrics = ScriptEngine.calculate_hook_score(fallback_text, target_lang)
         return {
             "success": True,
@@ -1610,47 +1610,88 @@ TASK: Elaborate, expand and enrich the story across Act 1, Act 2, and Act 3 with
         }
 
     @staticmethod
-    def _generate_fallback_script(title: str, lang: str, mood: str, persona: str) -> str:
-        """Resilient fallback storytelling templates for when LLM API is unreachable."""
-        templates = {
-            "en": f"""[SCENE: 00:00 - 00:45]
-[VOICEOVER]
-Nobody could have predicted the horrific secret hidden behind {title}.
-When our protagonist stepped into this dark mystery, every exit was already sealed.
-Slowly, the unsettling truth began to emerge, revealing a conspiracy that will leave you breathless.
-Make sure to follow and like for the shocking conclusion!""",
+    def _generate_fallback_script(title: str, lang: str, mood: str, persona: str, duration_mins: int = 3) -> str:
+        """Resilient fallback storytelling templates for when LLM API is unreachable.
+        Scales scene count and word budget to match the requested duration."""
 
-            "ur": f"""[SCENE: 00:00 - 00:45]
-[VOICEOVER]
-یہ کہانی شروع ہوتی ہے ایک ایسے پراسرار موڑ سے جہاں ہر لمحہ جان لیوا ثابت ہو سکتا ہے۔
-{title} کی اس داستان میں جب مرکزی کردار ایک تاریک راز کے پیچھے نکلا، تو اسے اندازہ نہیں تھا کہ اصل دشمن کون ہے۔
-آگے کیا ہوتا ہے؟ جاننے کے لیے ابھی لائک اور فالو کریں!""",
+        # Words per minute by language (approximate spoken rate at 'fast' speed)
+        wpm_map = {"ur": 120, "ar": 120, "hi": 140, "ja": 100, "ko": 100, "th": 90, "default": 145}
+        wpm = wpm_map.get(lang, wpm_map["default"])
+        target_words = max(80, wpm * duration_mins)
+        # Each scene block ~ 100 words; clamp between 1 and 12 scenes
+        num_scenes = max(1, min(12, round(target_words / 100)))
 
-            "hi": f"""[SCENE: 00:00 - 00:45]
-[VOICEOVER]
-यह कहानी शुरू होती है एक ऐसे ख़ौफ़नाक मोड़ से जहाँ हर कदम पर मौत खड़ी थी।
-{title} की इस कहानी में एक ऐसा भयानक सच सामने आता है जो आपके रोंगटे खड़े कर देगा।
-आगे की पूरी कहानी जानने के लिए अभी फ़ॉलो और लाइक करें!""",
+        # Per-language scene templates — list of (timestamp_end_min, narration)
+        def en_scenes(n):
+            beats = [
+                (0.5,  f"Nobody could have predicted the horrific secret hidden behind {title}. When our protagonist stepped into this dark mystery, every exit was already sealed."),
+                (1.0,  f"The deeper they searched, the more dangerous the truth became. Every ally turned out to be a stranger. Every door led to a new nightmare."),
+                (1.5,  f"Act Two begins in silence — but silence was the most deceptive weapon of all. The enemy was closer than anyone imagined."),
+                (2.0,  f"A shocking revelation tore apart everything the protagonist believed. The conspiracy ran deeper than any single person, and time was running out."),
+                (2.5,  f"With no allies left and no way out, the protagonist had only one option: face the truth head-on, no matter the cost."),
+                (3.0,  f"The climax erupts in a single, breathtaking confrontation. Every secret, every lie, every sacrifice — it all comes down to this one moment."),
+                (4.0,  f"In the chaos of the final battle, one truth stands above all: the real enemy was never the one they expected."),
+                (5.0,  f"When the dust settles, nothing will ever be the same. The protagonist walks away changed — scarred, wiser, and forever altered by what they uncovered."),
+                (6.5,  f"But even in victory, a shadow remains. One loose end. One unanswered question. One face they will never forget."),
+                (8.0,  f"The epilogue is quieter than the storm that came before — but no less chilling. Because in stories like {title}, endings are just new beginnings."),
+                (10.0, f"And so the cycle continues. New players. New secrets. But the same deadly game. Will the truth ever fully surface? Only time will tell."),
+                (12.5, f"Make sure to follow and like for more cinematic recaps — because every story has a secret worth uncovering, and we are just getting started."),
+            ]
+            return beats[:n]
 
-            "es": f"""[SCENE: 00:00 - 00:45]
-[VOICEOVER]
-Todo comienza con un giro aterrador que nadie vio venir en {title}.
-Cuando el protagonista descubre la verdad, ya era demasiado tarde para escapar de la trampa.
-¡Síguenos ahora para no perderte el impactante desenlace!""",
+        def ur_scenes(n):
+            beats = [
+                (0.5,  f"یہ کہانی شروع ہوتی ہے ایک ایسے پراسرار موڑ سے جہاں ہر لمحہ جان لیوا ثابت ہو سکتا ہے۔ {title} کی اس داستان میں ایک تاریک راز چھپا ہے جو سب کچھ بدل کر رکھ دے گا۔"),
+                (1.0,  f"مرکزی کردار کو جب حقیقت کی پہلی جھلک ملی تو وہ سمجھ گیا کہ دشمن بہت قریب ہے — اتنا قریب کہ سانس لینا بھی خطرناک لگنے لگا۔"),
+                (1.5,  f"دوسرے ایکٹ میں خاموشی نے سب سے بڑا وار کیا۔ جو دوست سمجھے تھے وہ غیر نکلے، اور جو غیر تھے وہ اصل ساتھی۔"),
+                (2.0,  f"اب وقت آ گیا تھا فیصلے کا۔ ایک طرف سچ، دوسری طرف موت — اور بیچ میں صرف ہمارا ہیرو، اکیلا، لیکن پرعزم۔"),
+                (2.5,  f"کلائمیکس میں وہ لمحہ آیا جب سب کچھ داؤ پر لگا تھا۔ دھماکے، راز، آنسو — سب ایک ساتھ، سب بیک وقت۔"),
+                (3.0,  f"آخر میں جو سچ سامنے آیا وہ سب سے بڑا جھٹکا تھا۔ اور اب آپ کا کام ہے: لائک کریں اور فالو کریں اگلی داستان کے لیے!"),
+            ]
+            return beats[:n]
 
-            "id": f"""[SCENE: 00:00 - 00:45]
-[VOICEOVER]
-Cerita bermula ketika sebuah rahasia kelam dalam {title} terungkap ke permukaan.
-Ketika sang tokoh utama mencoba mencari kebenaran, bahaya besar sudah menantinya di setiap sudut.
-Follow dan like sekarang untuk kelanjutan kisah menegangkan ini!""",
+        def hi_scenes(n):
+            beats = [
+                (0.5,  f"यह कहानी शुरू होती है एक ऐसे ख़ौफ़नाक मोड़ से जहाँ हर कदम पर मौत खड़ी थी। {title} की इस दुनिया में एक भयानक सच छिपा था।"),
+                (1.0,  f"जैसे-जैसे नायक आगे बढ़ा, हर राज़ एक नए दरवाज़े की तरह खुलता गया — और हर दरवाज़े के पीछे था एक और ख़तरा।"),
+                (1.5,  f"दूसरे अंक में साजिश का पर्दा उठा। दोस्त दुश्मन निकले, और दुश्मन कुछ और ही साबित हुए।"),
+                (2.0,  f"अब लड़ाई सिर्फ जीने-मरने की नहीं थी — यह सच और झूठ की, विश्वास और धोखे की लड़ाई थी।"),
+                (2.5,  f"क्लाइमेक्स में सब कुछ एक पल में सिमट आया। वो एक सवाल जो पूरी फिल्म में गूँजता रहा — आखिरकार उसका जवाब मिला।"),
+                (3.0,  f"आगे की पूरी कहानी जानने के लिए अभी फ़ॉलो और लाइक करें — क्योंकि यह सिर्फ शुरुआत है!"),
+            ]
+            return beats[:n]
 
-            "ar": f"""[SCENE: 00:00 - 00:45]
-[VOICEOVER]
-تبدأ هذه القصة مع لغز غامض ومرعب في {title} لا يمكن لأحد توقعه.
-عندما اقترب البطل من كشف الحقيقة، أدرك أن الخطر يحيط به من كل جانب.
-تابعنا الآن لمشاهدة النهاية الصادمة!"""
-        }
-        return templates.get(lang, templates["en"])
+        def ar_scenes(n):
+            beats = [
+                (0.5,  f"تبدأ هذه القصة مع لغز غامض ومرعب في {title} لا يمكن لأحد توقعه."),
+                (1.0,  f"عندما اقترب البطل من كشف الحقيقة، أدرك أن الخطر يحيط به من كل جانب."),
+                (1.5,  f"في الفصل الثاني، تنكشف خيانة مروعة تقلب كل المعادلات رأساً على عقب."),
+                (2.0,  f"في ذروة الأحداث، يُجبر البطل على خيار مصيري: الحقيقة أم النجاة؟"),
+                (2.5,  f"والنهاية؟ كانت أكثر إدهاشاً مما توقعه أي أحد. تابعنا الآن لمشاهدة القصة كاملة!"),
+            ]
+            return beats[:n]
+
+        def generic_scenes(n, lang_template_fn):
+            return lang_template_fn(n)
+
+        scene_fns = {"en": en_scenes, "ur": ur_scenes, "hi": hi_scenes, "ar": ar_scenes}
+        scene_fn = scene_fns.get(lang, en_scenes)
+        scenes = scene_fn(num_scenes)
+
+        def fmt(m: float) -> str:
+            mm = int(m)
+            ss = int(round((m - mm) * 60))
+            return f"{mm:02d}:{ss:02d}"
+
+        lines = []
+        for i, (end_min, narration) in enumerate(scenes):
+            start_min = 0.0 if i == 0 else scenes[i - 1][0]
+            lines.append(f"[SCENE: {fmt(start_min)} - {fmt(end_min)}]")
+            lines.append("[VOICEOVER]")
+            lines.append(narration)
+            lines.append("")
+
+        return "\n".join(lines).strip()
 
     @staticmethod
     def translate_script_to_languages(primary_script: str, languages: List[str]) -> Dict[str, str]:

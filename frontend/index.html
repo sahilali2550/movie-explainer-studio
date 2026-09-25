@@ -189,9 +189,10 @@
           <span id="sourceBadge" class="rounded-full border border-line bg-panel2 px-2.5 py-1 text-[10px] text-muted">Waiting</span>
         </div>
 
-        <div class="mb-3 grid grid-cols-2 gap-2">
+        <div class="mb-3 grid grid-cols-3 gap-2">
           <button id="youtubeTab" class="source-tab rounded-lg border border-accent bg-accent/10 px-3 py-2 text-xs font-semibold text-blue-100">▶ YouTube URL</button>
           <button id="fileTab" class="source-tab rounded-lg border border-line bg-panel2 px-3 py-2 text-xs text-muted">▣ Local Video</button>
+          <button id="transcriptTab" class="source-tab rounded-lg border border-line bg-panel2 px-3 py-2 text-xs text-muted">📝 Paste Transcript</button>
         </div>
 
         <div id="youtubeSource">
@@ -209,6 +210,12 @@
             <p class="mt-1 text-[11px] text-muted">MP4, MOV, MKV — or click to browse</p>
             <input id="fileInput" type="file" accept="video/*" class="hidden" />
           </div>
+        </div>
+
+        <div id="transcriptSource" class="hidden">
+          <label class="mb-1.5 block text-[11px] font-medium text-muted">Paste Script / Plot Summary / Subtitles</label>
+          <textarea id="transcriptPasteArea" class="input h-[90px] w-full resize-none px-3 py-2 text-xs leading-5" placeholder="Paste your movie plot, subtitles, or a script from ChatGPT / Gemini here... ($0 budget — no API key needed)"></textarea>
+          <p class="mt-1.5 text-[10px] text-muted">💡 Use this when YouTube captions are disabled. Just paste plot from any free AI, press Generate.</p>
         </div>
 
         <div id="sourcePreview" class="mt-3 flex items-center gap-3 rounded-xl border border-line bg-panel2 p-3">
@@ -239,6 +246,41 @@
           <span id="scriptBadge" class="rounded-full border border-line bg-panel2 px-2.5 py-1 text-[10px] text-muted">Auto-Ready</span>
         </div>
 
+        <!-- Language + Duration Row -->
+        <div class="mb-3 grid grid-cols-2 gap-3">
+          <div>
+            <label class="mb-1.5 block text-[10px] uppercase tracking-wider text-muted">🌐 Story Language</label>
+            <select id="scriptLangSelect" class="input h-9 px-2 text-xs">
+              <option value="en" selected>🇺🇸 English</option>
+              <option value="ur">🇵🇰 Urdu — اردو</option>
+              <option value="hi">🇮🇳 Hindi — हिन्दी</option>
+              <option value="ar">🇸🇦 Arabic — العربية</option>
+              <option value="es">🇲🇽 Spanish — Español</option>
+              <option value="id">🇮🇩 Indonesian — Bahasa</option>
+              <option value="pt">🇧🇷 Portuguese — Português</option>
+              <option value="de">🇩🇪 German — Deutsch</option>
+              <option value="fr">🇫🇷 French — Français</option>
+              <option value="ru">🇷🇺 Russian — Русский</option>
+              <option value="tr">🇹🇷 Turkish — Türkçe</option>
+              <option value="it">🇮🇹 Italian — Italiano</option>
+              <option value="vi">🇻🇳 Vietnamese — Tiếng Việt</option>
+              <option value="th">🇹🇭 Thai — ไทย</option>
+              <option value="ja">🇯🇵 Japanese — 日本語</option>
+              <option value="ko">🇰🇷 Korean — 한국어</option>
+            </select>
+          </div>
+          <div>
+            <label class="mb-1.5 block text-[10px] uppercase tracking-wider text-muted">⏱ Target Duration</label>
+            <div class="flex gap-1.5" id="durationBtns">
+              <button type="button" data-dur="1"  class="dur-btn flex-1 rounded-md border border-line bg-panel2 py-1.5 text-[9px] text-muted hover:border-accent hover:text-blue-200">1m</button>
+              <button type="button" data-dur="3"  class="dur-btn flex-1 rounded-md border border-line bg-panel2 py-1.5 text-[9px] text-muted hover:border-accent hover:text-blue-200">3m</button>
+              <button type="button" data-dur="5"  class="dur-btn flex-1 rounded-md border border-accent bg-accent/10 py-1.5 text-[9px] font-semibold text-blue-100">5m ⭐</button>
+              <button type="button" data-dur="10" class="dur-btn flex-1 rounded-md border border-line bg-panel2 py-1.5 text-[9px] text-muted hover:border-accent hover:text-blue-200">10m</button>
+              <button type="button" data-dur="15" class="dur-btn flex-1 rounded-md border border-line bg-panel2 py-1.5 text-[9px] text-muted hover:border-accent hover:text-blue-200">15m</button>
+            </div>
+          </div>
+        </div>
+
         <div class="grid grid-cols-[1fr_145px] gap-3">
           <div class="overflow-hidden rounded-xl border border-line bg-[#060d18]">
             <div class="flex border-b border-line">
@@ -247,7 +289,7 @@
             </div>
 
             <div id="scriptPanel" class="h-[185px] overflow-y-auto p-3 text-[11px] leading-5 text-slate-300">
-              <textarea id="scriptArea" class="h-full w-full resize-none border-none bg-transparent p-0 text-[11px] leading-5 text-slate-300 outline-none" placeholder="AI-generated storyboard script will appear here automatically on 1-Click Generate, or you can paste your own narrative script..."></textarea>
+              <textarea id="scriptArea" class="h-full w-full resize-none border-none bg-transparent p-0 text-[11px] leading-5 text-slate-300 outline-none" placeholder="AI-generated storyboard script will appear here. You can also paste your own script here then click Render Video below..."></textarea>
             </div>
 
             <div id="scenePanel" class="hidden h-[185px] overflow-y-auto p-3">
@@ -274,6 +316,11 @@
             </button>
           </aside>
         </div>
+
+        <!-- Step 1 Action Button -->
+        <button id="generateScriptBtn" type="button" class="btn mt-3 flex h-10 w-full items-center justify-center gap-2 rounded-xl border border-accent/50 bg-accent/10 text-sm font-semibold text-blue-100 hover:bg-accent/20">
+          ⚡ Generate AI Script
+        </button>
       </article>
 
       <!-- 3. VOICE, SUBTITLES & VISUAL CONTROLS -->
@@ -288,22 +335,80 @@
 
         <div class="grid grid-cols-2 gap-3">
           <div>
-            <label class="mb-1.5 block text-[10px] uppercase tracking-wider text-muted">Narrator Voice</label>
+            <label class="mb-1.5 block text-[10px] uppercase tracking-wider text-muted">🎙️ Narrator Voice</label>
             <select id="voiceSelect" class="input h-10 px-3 text-xs">
-              <option value="en-US-ChristopherNeural" selected>Christopher (Deep Hollywood Male - EN)</option>
-              <option value="en-US-JennyNeural">Jenny (Expressive Female - EN)</option>
-              <option value="ur-PK-AsadNeural">Asad (Deep Cinema Male - Urdu)</option>
-              <option value="ur-PK-UzmaNeural">Uzma (Warm Storyteller Female - Urdu)</option>
-              <option value="hi-IN-MadhurNeural">Madhur (Cinematic Recapper - Hindi)</option>
-              <option value="ar-SA-HamedNeural">Hamed (Deep Documentary - Arabic)</option>
-              <option value="es-MX-DaliaNeural">Dalia (Resumen Narrator - Spanish)</option>
+              <optgroup label="🇺🇸 English">
+                <option value="en-US-ChristopherNeural" selected>Christopher — Deep Hollywood Male</option>
+                <option value="en-US-JennyNeural">Jenny — Expressive Female</option>
+              </optgroup>
+              <optgroup label="🇵🇰 Urdu — اردو">
+                <option value="ur-PK-AsadNeural">Asad — Deep Cinema Male</option>
+                <option value="ur-PK-UzmaNeural">Uzma — Warm Storyteller Female</option>
+              </optgroup>
+              <optgroup label="🇮🇳 Hindi — हिन्दी">
+                <option value="hi-IN-MadhurNeural">Madhur — Cinematic Recapper Male</option>
+                <option value="hi-IN-SwaraNeural">Swara — Expressive Drama Female</option>
+              </optgroup>
+              <optgroup label="🇸🇦 Arabic — العربية">
+                <option value="ar-SA-HamedNeural">Hamed — Deep Documentary Male</option>
+                <option value="ar-SA-ZariyahNeural">Zariyah — Warm Cinema Female</option>
+              </optgroup>
+              <optgroup label="🇲🇽 Spanish — Español">
+                <option value="es-ES-AlvaroNeural">Alvaro — Cinema Narrator Male</option>
+                <option value="es-MX-DaliaNeural">Dalia — Resumen Narrator Female</option>
+              </optgroup>
+              <optgroup label="🇮🇩 Indonesian — Bahasa">
+                <option value="id-ID-ArdiNeural">Ardi — Cinematic Male</option>
+                <option value="id-ID-GadisNeural">Gadis — Storyteller Female</option>
+              </optgroup>
+              <optgroup label="🇧🇷 Portuguese — Português">
+                <option value="pt-BR-AntonioNeural">Antonio — Cinema Male</option>
+                <option value="pt-BR-FranciscaNeural">Francisca — Drama Female</option>
+              </optgroup>
+              <optgroup label="🇩🇪 German — Deutsch">
+                <option value="de-DE-ConradNeural">Conrad — Deep Documentary Male</option>
+                <option value="de-DE-KatjaNeural">Katja — Clear Storyteller Female</option>
+              </optgroup>
+              <optgroup label="🇫🇷 French — Français">
+                <option value="fr-FR-HenriNeural">Henri — Cinema French Male</option>
+                <option value="fr-FR-DeniseNeural">Denise — Drama Female</option>
+              </optgroup>
+              <optgroup label="🇷🇺 Russian — Русский">
+                <option value="ru-RU-DmitryNeural">Dmitry — Deep Narrator Male</option>
+                <option value="ru-RU-SvetlanaNeural">Svetlana — Dramatic Female</option>
+              </optgroup>
+              <optgroup label="🇹🇷 Turkish — Türkçe">
+                <option value="tr-TR-AhmetNeural">Ahmet — Sinematik Male</option>
+                <option value="tr-TR-EmelNeural">Emel — Drama Female</option>
+              </optgroup>
+              <optgroup label="🇮🇹 Italian — Italiano">
+                <option value="it-IT-DiegoNeural">Diego — Cinema Italiano Male</option>
+                <option value="it-IT-ElsaNeural">Elsa — Warm Story Female</option>
+              </optgroup>
+              <optgroup label="🇻🇳 Vietnamese — Tiếng Việt">
+                <option value="vi-VN-NamMinhNeural">NamMinh — Documentary Male</option>
+                <option value="vi-VN-HoaiMyNeural">HoaiMy — Storyteller Female</option>
+              </optgroup>
+              <optgroup label="🇹🇭 Thai — ไทย">
+                <option value="th-TH-NiwatNeural">Niwat — Cinematic Male</option>
+                <option value="th-TH-PremwadeeNeural">Premwadee — Narrator Female</option>
+              </optgroup>
+              <optgroup label="🇯🇵 Japanese — 日本語">
+                <option value="ja-JP-KeitaNeural">Keita — Cinema Male</option>
+                <option value="ja-JP-NanamiNeural">Nanami — Anime & Film Female</option>
+              </optgroup>
+              <optgroup label="🇰🇷 Korean — 한국어">
+                <option value="ko-KR-InJoonNeural">InJoon — K-Drama Narrator Male</option>
+                <option value="ko-KR-SunHiNeural">SunHi — Storyteller Female</option>
+              </optgroup>
             </select>
           </div>
           <div>
-            <label class="mb-1.5 block text-[10px] uppercase tracking-wider text-muted">Speed</label>
-            <div class="flex items-center gap-3">
-              <input id="speed" type="range" min="0.8" max="1.2" step="0.05" value="1" class="w-full accent-blue-500" />
-              <span id="speedValue" class="w-9 text-right text-[10px]">1.00x</span>
+            <label class="mb-1.5 block text-[10px] uppercase tracking-wider text-muted">⚡ Narration Speed</label>
+            <div class="flex gap-2" id="speedBtns">
+              <button type="button" data-speed="normal"      class="speed-btn flex-1 rounded-lg border border-line bg-panel2 py-2 text-[10px] text-muted hover:border-accent hover:text-blue-200">Normal<br><span class="text-[8px] opacity-60">1.0x</span></button>
+              <button type="button" data-speed="fast"        class="speed-btn flex-1 rounded-lg border border-accent bg-accent/10 py-2 text-[10px] font-semibold text-blue-100">Fast ⭐<br><span class="text-[8px]">1.15x</span></button>
+              <button type="button" data-speed="ultra_fast"  class="speed-btn flex-1 rounded-lg border border-line bg-panel2 py-2 text-[10px] text-muted hover:border-accent hover:text-blue-200">Ultra<br><span class="text-[8px] opacity-60">1.25x</span></button>
             </div>
           </div>
         </div>
@@ -358,7 +463,7 @@
         </div>
 
         <button id="generateBtn" type="button" class="gradient-btn btn mt-4 flex h-12 w-full items-center justify-center gap-2 rounded-xl text-sm font-bold text-white shadow-button">
-          ⚡ 1-Click Generate & Render Recap
+          🎬 Render Final Video
         </button>
       </article>
     </section>
@@ -595,7 +700,7 @@
         </div>
         <div>
           <label class="mb-1 block text-[10px] text-muted">API Key (Pre-filled / Saved)</label>
-          <input id="ai9Key" type="password" class="input h-9 px-3 text-xs" placeholder="sk-..." />
+          <input id="ai9Key" type="password" autocomplete="new-password" class="input h-9 px-3 text-xs" placeholder="sk-..." />
         </div>
       </div>
 
@@ -607,7 +712,7 @@
         </div>
         <div>
           <label class="mb-1 block text-[10px] text-muted">Google AI Studio API Key</label>
-          <input id="aiGeminiKey" type="password" class="input h-9 px-3 text-xs" placeholder="AIzaSy..." />
+          <input id="aiGeminiKey" type="password" autocomplete="new-password" class="input h-9 px-3 text-xs" placeholder="AIzaSy..." />
           <p class="mt-1 text-[9px] text-muted">
             1,500 daily requests free at <a href="https://aistudio.google.com/" target="_blank" class="text-accent underline font-medium">aistudio.google.com</a> (Zero cost, no credit card required).
           </p>
@@ -630,7 +735,7 @@
         </div>
         <div>
           <label class="mb-1 block text-[10px] text-muted">OpenAI API Key</label>
-          <input id="aiOpenaiKey" type="password" class="input h-9 px-3 text-xs" placeholder="sk-..." />
+          <input id="aiOpenaiKey" type="password" autocomplete="new-password" class="input h-9 px-3 text-xs" placeholder="sk-..." />
         </div>
         <div>
           <label class="mb-1 block text-[10px] text-muted">Model</label>
@@ -657,7 +762,7 @@
         </div>
         <div>
           <label class="mb-1 block text-[10px] text-muted">API Key (if required)</label>
-          <input id="aiCustomKey" type="password" class="input h-9 px-3 text-xs" placeholder="gsk_... or bearer key" />
+          <input id="aiCustomKey" type="password" autocomplete="new-password" class="input h-9 px-3 text-xs" placeholder="gsk_... or bearer key" />
         </div>
       </div>
 
@@ -682,6 +787,28 @@
 
   <!-- APPLICATION JAVASCRIPT: CONNECTED TO REAL FASTAPI BACKEND -->
   <script>
+    // SECURITY: attach the server-injected API token to every /api/* call.
+    (function () {
+      const _fetch = window.fetch.bind(window);
+      window.fetch = function (url, opts) {
+        opts = opts || {};
+        if (typeof url === "string" && url.indexOf("/api/") === 0 && window.__API_TOKEN__) {
+          const headers = new Headers(opts.headers || {});
+          headers.set("X-API-Token", window.__API_TOKEN__);
+          opts.headers = headers;
+        }
+        return _fetch(url, opts);
+      };
+    })();
+
+    function apiUrlWithToken(url) {
+      if (window.__API_TOKEN__ && url.indexOf("/api/") === 0) {
+        const sep = url.indexOf("?") === -1 ? "?" : "&";
+        return url + sep + "token=" + encodeURIComponent(window.__API_TOKEN__);
+      }
+      return url;
+    }
+
     const stages = [
       ["Transcript", "SOURCE_ANALYZING"],
       ["Story", "STORY_READY"],
@@ -893,19 +1020,26 @@
       state.isPollingLogs = false;
     }
 
-    // Source Tabs
-    $("youtubeTab").onclick = () => {
-      $("youtubeSource").classList.remove("hidden");
-      $("fileSource").classList.add("hidden");
-      $("youtubeTab").className = "source-tab rounded-lg border border-accent bg-accent/10 px-3 py-2 text-xs font-semibold text-blue-100";
-      $("fileTab").className = "source-tab rounded-lg border border-line bg-panel2 px-3 py-2 text-xs text-muted";
-    };
+    // Source Tabs (3-way: YouTube / Local Video / Paste Transcript)
+    const TAB_ACTIVE   = "source-tab rounded-lg border border-accent bg-accent/10 px-3 py-2 text-xs font-semibold text-blue-100";
+    const TAB_INACTIVE = "source-tab rounded-lg border border-line bg-panel2 px-3 py-2 text-xs text-muted";
 
-    $("fileTab").onclick = () => {
-      $("youtubeSource").classList.add("hidden");
-      $("fileSource").classList.remove("hidden");
-      $("fileTab").className = "source-tab rounded-lg border border-accent bg-accent/10 px-3 py-2 text-xs font-semibold text-blue-100";
-      $("youtubeTab").className = "source-tab rounded-lg border border-line bg-panel2 px-3 py-2 text-xs text-muted";
+    function switchSourceTab(active) {
+      $("youtubeSource").classList.toggle("hidden",    active !== "youtube");
+      $("fileSource").classList.toggle("hidden",       active !== "file");
+      $("transcriptSource").classList.toggle("hidden", active !== "transcript");
+      $("youtubeTab").className    = active === "youtube"    ? TAB_ACTIVE : TAB_INACTIVE;
+      $("fileTab").className       = active === "file"       ? TAB_ACTIVE : TAB_INACTIVE;
+      $("transcriptTab").className = active === "transcript" ? TAB_ACTIVE : TAB_INACTIVE;
+    }
+    $("youtubeTab").onclick    = () => switchSourceTab("youtube");
+    $("fileTab").onclick       = () => switchSourceTab("file");
+    $("transcriptTab").onclick = () => {
+      switchSourceTab("transcript");
+      $("sourceTitle").textContent = "Transcript / Plot Mode";
+      $("sourceMeta").textContent  = "AI will write script from your pasted text — no video download needed.";
+      $("sourceValid").textContent = "Ready";
+      $("sourceValid").className   = "rounded-md bg-success/10 px-2 py-1 text-[10px] font-semibold text-success";
     };
 
     $("urlInput").addEventListener("input", e => {
@@ -1007,9 +1141,33 @@
     $("landscapeBtn").onclick = () => setRatio("16:9");
     $("verticalBtn").onclick = () => setRatio("9:16");
 
-    $("speed").oninput = e => {
-      $("speedValue").textContent = `${Number(e.target.value).toFixed(2)}x`;
-    };
+    // Duration Buttons — track selected duration (default 5 mins)
+    let selectedDuration = 5;
+    document.querySelectorAll(".dur-btn").forEach(btn => {
+      btn.addEventListener("click", () => {
+        selectedDuration = parseInt(btn.dataset.dur, 10);
+        document.querySelectorAll(".dur-btn").forEach(b => {
+          const isActive = b.dataset.dur === btn.dataset.dur;
+          b.className = isActive
+            ? "dur-btn flex-1 rounded-md border border-accent bg-accent/10 py-1.5 text-[9px] font-semibold text-blue-100"
+            : "dur-btn flex-1 rounded-md border border-line bg-panel2 py-1.5 text-[9px] text-muted hover:border-accent hover:text-blue-200";
+        });
+      });
+    });
+
+    // Speed Preset Buttons — track selected speed (default fast)
+    let selectedSpeed = "fast";
+    document.querySelectorAll(".speed-btn").forEach(btn => {
+      btn.addEventListener("click", () => {
+        selectedSpeed = btn.dataset.speed;
+        document.querySelectorAll(".speed-btn").forEach(b => {
+          const isActive = b.dataset.speed === selectedSpeed;
+          b.className = isActive
+            ? "speed-btn flex-1 rounded-lg border border-accent bg-accent/10 py-2 text-[10px] font-semibold text-blue-100"
+            : "speed-btn flex-1 rounded-lg border border-line bg-panel2 py-2 text-[10px] text-muted hover:border-accent hover:text-blue-200";
+        });
+      });
+    });
 
     $("advancedBtn").onclick = () => $("advancedPanel").classList.toggle("hidden-panel");
 
@@ -1040,17 +1198,97 @@
       }
     };
 
-    // Real 1-Click Generate & Render Engine Connection
-    async function runPipeline() {
-      const isUrlMode = !$("youtubeSource").classList.contains("hidden");
-      const url = $("urlInput").value.trim();
-      const localFile = $("fileInput").files[0];
+    // Helper: derive language code from chosen voice string
+    function voiceLangCode(voice) {
+      const prefix = voice.split("-").slice(0, 2).join("-").toLowerCase();
+      const map = {
+        "ur-pk": "ur", "hi-in": "hi", "ar-sa": "ar", "es-mx": "es", "es-es": "es",
+        "id-id": "id", "pt-br": "pt", "de-de": "de", "fr-fr": "fr", "ru-ru": "ru",
+        "tr-tr": "tr", "it-it": "it", "vi-vn": "vi", "th-th": "th",
+        "ja-jp": "ja", "ko-kr": "ko", "en-us": "en", "en-gb": "en"
+      };
+      return map[prefix] || "en";
+    }
 
-      if (isUrlMode && !url) {
-        toast("Please provide a YouTube video URL.", "error");
+    // STEP 1 — Generate AI Script only
+    async function runScriptOnly() {
+      const isUrlMode        = !$("youtubeSource").classList.contains("hidden");
+      const isFileMode       = !$("fileSource").classList.contains("hidden");
+      const isTranscriptMode = !$("transcriptSource").classList.contains("hidden");
+      const url              = $("urlInput").value.trim();
+      const localFile        = $("fileInput").files[0];
+      const pastedTranscript = $("transcriptPasteArea").value.trim();
+
+      if (isUrlMode && !url) { toast("Please provide a YouTube URL.", "error"); return; }
+      if (isFileMode && !localFile) { toast("Please drop a local video file.", "error"); return; }
+      if (isTranscriptMode && !pastedTranscript) { toast("Please paste transcript / plot text.", "error"); return; }
+
+      $("generateScriptBtn").disabled = true;
+      $("generateScriptBtn").textContent = "⏳ Generating Script...";
+      setStatus("Generating AI narrative storyboard script...", "Scripting");
+
+      try {
+        const sFd = new FormData();
+        if (isUrlMode) sFd.append("url", url);
+        else if (isFileMode && localFile) sFd.append("local_file", localFile);
+        if (pastedTranscript) sFd.append("custom_transcript", pastedTranscript);
+
+        const scriptLang = $("scriptLangSelect").value;
+        sFd.append("language",      scriptLang);
+        sFd.append("duration_mins", String(selectedDuration));
+        sFd.append("voice_speed",   selectedSpeed);
+
+        const scriptRes = await fetch("/api/v1/explainer/generate-script", { method: "POST", body: sFd });
+        if (!scriptRes.ok) {
+          const err = await scriptRes.json();
+          throw new Error(err.detail || "Script generation failed.");
+        }
+        const sData = await scriptRes.json();
+        const scriptText = sData.script || "";
+        $("scriptArea").value = scriptText;
+
+        // Update stats
+        const words = scriptText.trim() ? scriptText.trim().split(/\s+/).length : 0;
+        $("statWords").textContent = words;
+        const estSec = Math.round((words / 155) * 60);
+        const m = Math.floor(estSec / 60);
+        const s = estSec % 60;
+        $("statDuration").textContent = `${estSec}.0s`;
+        $("statDurationFormatted").textContent = `${String(m).padStart(2,"0")}:${String(s).padStart(2,"0")}`;
+        $("statCuts").textContent = Math.ceil(estSec / 4.5);
+        state.totalClips = Math.ceil(estSec / 4.5);
+        updateUI();
+
+        setStatus("Script ready — review or edit, then click Render Final Video ↓", "Script Ready");
+        toast(`✅ Script generated! ${words} words · ~${selectedDuration} mins`, "success");
+      } catch (err) {
+        toast(err.message, "error");
+        setStatus(`Script Error: ${err.message}`, "Failed");
+      } finally {
+        $("generateScriptBtn").disabled = false;
+        $("generateScriptBtn").textContent = "⚡ Generate AI Script";
+      }
+    }
+    $("generateScriptBtn").onclick = runScriptOnly;
+
+    // STEP 2 — Render Final Video
+    async function runPipeline() {
+      const isUrlMode        = !$("youtubeSource").classList.contains("hidden");
+      const isFileMode       = !$("fileSource").classList.contains("hidden");
+      const isTranscriptMode = !$("transcriptSource").classList.contains("hidden");
+      const url              = $("urlInput").value.trim();
+      const localFile        = $("fileInput").files[0];
+      const scriptText       = $("scriptArea").value.trim();
+
+      if (!scriptText) {
+        toast("Please generate or paste a script first (Step 1 above).", "error");
         return;
       }
-      if (!isUrlMode && !localFile) {
+      if (isUrlMode && !url && !isTranscriptMode) {
+        toast("Please provide a YouTube URL or switch to Transcript mode.", "error");
+        return;
+      }
+      if (isFileMode && !localFile) {
         toast("Please drop or choose a local video file.", "error");
         return;
       }
@@ -1059,68 +1297,33 @@
       state.activeStage = 0;
       state.progress = 5;
       $("generateBtn").disabled = true;
-      $("generateBtn").textContent = "⏳ Producing 1-Click Explainer...";
-      setStatus("Analyzing source and initializing pipeline...", "Producing");
+      $("generateBtn").textContent = "⏳ Rendering Video...";
+      setStatus("Synthesizing voiceover and selective footage...", "Rendering Pipeline");
       updateUI();
-
       startLogPolling();
 
       try {
-        let scriptText = $("scriptArea").value.trim();
-
-        // Step A: Auto-generate script if not provided
-        if (!scriptText) {
-          setStatus("Generating AI narrative storyboard script...", "Scripting");
-          state.activeStage = 1;
-          state.progress = 18;
-          updateUI();
-
-          const sFd = new FormData();
-          if (isUrlMode) sFd.append("url", url);
-          else if (localFile) sFd.append("local_file", localFile);
-          sFd.append("language", "en");
-
-          const scriptRes = await fetch("/api/v1/explainer/generate-script", { method: "POST", body: sFd });
-          if (!scriptRes.ok) {
-            const err = await scriptRes.json();
-            throw new Error(err.detail || "Script generation failed.");
-          }
-          const sData = await scriptRes.json();
-          scriptText = sData.script || "";
-          $("scriptArea").value = scriptText;
-
-          // Parse words & scene count
-          const words = scriptText.split(/\s+/).length;
-          $("statWords").textContent = words;
-          const estSec = Math.round((words / 155) * 60);
-          $("statDuration").textContent = `${estSec}.0s`;
-          $("statCuts").textContent = Math.ceil(estSec / 4.5);
-          state.totalClips = Math.ceil(estSec / 4.5);
-          updateUI();
-        }
-
-        // Step B: Render Video Pipeline
-        setStatus("Synthesizing voiceover and selective footage...", "Rendering Pipeline");
         state.activeStage = 3;
         state.progress = 35;
         updateUI();
 
+        const chosenVoice = $("voiceSelect").value;
+        const voiceLang   = voiceLangCode(chosenVoice);
+
         const rFd = new FormData();
         rFd.append("script_text", scriptText);
-        rFd.append("title", "Cinematic Movie Story Recap");
-        if (isUrlMode) rFd.append("url", url);
-        else if (localFile) rFd.append("local_file", localFile);
-
-        const chosenVoice = $("voiceSelect").value;
-        rFd.append("voice", chosenVoice);
-        rFd.append("language", chosenVoice.startsWith("ur-") ? "ur" : chosenVoice.startsWith("hi-") ? "hi" : chosenVoice.startsWith("ar-") ? "ar" : chosenVoice.startsWith("es-") ? "es" : "en");
-        rFd.append("voice_speed", Number($("speed").value) > 1.1 ? "fast" : "normal");
+        rFd.append("title",       "Cinematic Movie Story Recap");
+        if (isUrlMode && url) rFd.append("url", url);
+        else if (isFileMode && localFile) rFd.append("local_file", localFile);
+        rFd.append("voice",        chosenVoice);
+        rFd.append("language",     voiceLang);
+        rFd.append("voice_speed",  selectedSpeed);
         rFd.append("aspect_ratio", state.ratio === "9:16" ? "vertical" : "horizontal");
-        rFd.append("mood_theme", $("soundtrackMood").value);
-        rFd.append("audio_mode", "hybrid");
+        rFd.append("mood_theme",   $("soundtrackMood").value);
+        rFd.append("audio_mode",   "hybrid");
         rFd.append("burn_subtitles", $("subtitles").checked);
-        rFd.append("resolution", $("resolutionSelect").value);
-        rFd.append("watermark", $("watermarkInput").value.trim());
+        rFd.append("resolution",   $("resolutionSelect").value);
+        rFd.append("watermark",    $("watermarkInput").value.trim());
 
         const renderRes = await fetch("/api/v1/explainer/render-video", { method: "POST", body: rFd });
         const renderData = await renderRes.json();
@@ -1129,7 +1332,6 @@
           throw new Error(renderData.detail || renderData.error || "Rendering pipeline failed.");
         }
 
-        // Production Complete
         state.phase = "complete";
         state.activeStage = 11;
         state.progress = 100;
@@ -1139,12 +1341,10 @@
 
         const videoUrl = renderData.video_url || `/outputs/${renderData.video_filename}`;
         state.lastVideoUrl = videoUrl;
-
         $("outputFilename").textContent = renderData.video_filename || "explainer_final.mp4";
-        $("outputDuration").textContent = renderData.duration ? `${Math.round(renderData.duration)}s` : "04:04";
+        $("outputDuration").textContent = renderData.duration ? `${Math.round(renderData.duration)}s` : "—";
         $("outputRes").textContent = $("resolutionSelect").value;
 
-        // Load video into built-in player
         const player = $("mainVideoPlayer");
         player.src = videoUrl;
         $("playerPlaceholder").classList.add("hidden");
@@ -1158,7 +1358,7 @@
         toast(err.message, "error");
       } finally {
         $("generateBtn").disabled = false;
-        $("generateBtn").textContent = "⚡ 1-Click Generate & Render Recap";
+        $("generateBtn").textContent = "🎬 Render Final Video";
         setTimeout(stopLogPolling, 4000);
       }
     }
@@ -1288,20 +1488,24 @@
           if (p["9router"]) {
             $("ai9Url").value = p["9router"].url || "http://127.0.0.1:20128/v1";
             $("ai9Combo").value = p["9router"].model || "new-combo";
-            $("ai9Key").value = p["9router"].key || "";
+            $("ai9Key").value = "";
+            $("ai9Key").placeholder = p["9router"].key_masked ? `${p["9router"].key_masked} (saved)` : "sk-...";
           }
           if (p["gemini"]) {
-            $("aiGeminiKey").value = p["gemini"].key || "";
+            $("aiGeminiKey").value = "";
+            $("aiGeminiKey").placeholder = p["gemini"].key_masked ? `${p["gemini"].key_masked} (saved)` : "AIzaSy...";
             if (p["gemini"].model) $("aiGeminiModel").value = p["gemini"].model;
           }
           if (p["openai"]) {
-            $("aiOpenaiKey").value = p["openai"].key || "";
+            $("aiOpenaiKey").value = "";
+            $("aiOpenaiKey").placeholder = p["openai"].key_masked ? `${p["openai"].key_masked} (saved)` : "sk-...";
             if (p["openai"].model) $("aiOpenaiModel").value = p["openai"].model;
           }
           if (p["custom"]) {
             $("aiCustomUrl").value = p["custom"].url || "http://localhost:11434/v1";
             $("aiCustomModel").value = p["custom"].model || "llama3";
-            $("aiCustomKey").value = p["custom"].key || "";
+            $("aiCustomKey").value = "";
+            $("aiCustomKey").placeholder = p["custom"].key_masked ? `${p["custom"].key_masked} (saved)` : "bearer key";
           }
           selectAiTab(cfg.active_provider || "9router");
         }
@@ -1353,14 +1557,15 @@
 
         const res = await fetch("/api/v1/explainer/test-ai-connection", { method: "POST", body: fd });
         const data = await res.json();
-        if (data.online) {
+        if (res.ok && data.online) {
           $("aiFeedbackDot").className = "h-2 w-2 rounded-full bg-success";
           $("aiFeedbackText").textContent = `🟢 ${data.message || 'Connected successfully!'} (${data.latency_ms || 0}ms)`;
           toast(`Connected to ${currentSelectedProvider.toUpperCase()} successfully!`, "success");
         } else {
+          const errMsg = data.message || data.detail || (res.status === 401 ? "Unauthorized: API token missing" : "Connection failed");
           $("aiFeedbackDot").className = "h-2 w-2 rounded-full bg-danger";
-          $("aiFeedbackText").textContent = `🔴 Failed: ${data.message || 'Connection failed'}`;
-          toast(data.message || "Connection failed.", "error");
+          $("aiFeedbackText").textContent = `🔴 Failed: ${errMsg}`;
+          toast(errMsg, "error");
         }
       } catch (err) {
         $("aiFeedbackDot").className = "h-2 w-2 rounded-full bg-danger";
@@ -1391,13 +1596,14 @@
 
         const res = await fetch("/api/v1/explainer/ai-config", { method: "POST", body: fd });
         const data = await res.json();
-        if (data.success) {
+        if (res.ok && data.success) {
           toast(`Active AI set to ${currentSelectedProvider.toUpperCase()}!`, "success");
           addLog(`AI Provider switched to ${currentSelectedProvider.toUpperCase()}`, "success");
           checkBackendStatus();
           $("closeAiModal").click();
         } else {
-          toast("Could not save settings.", "error");
+          const errMsg = data.message || data.detail || "Could not save settings.";
+          toast(errMsg, "error");
         }
       } catch (e) {
         toast(e.message, "error");

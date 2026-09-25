@@ -1,5 +1,8 @@
 import os
+import html
 import logging
+import secrets
+import time
 from pathlib import Path
 from typing import List, Optional, Dict, Any
 from fastapi import APIRouter, HTTPException, Query, Request
@@ -46,6 +49,35 @@ def _sanitize_channel(ch: Dict[str, Any]) -> Dict[str, Any]:
     sanitized.pop("refresh_token", None)
     sanitized["has_token"] = bool(ch.get("refresh_token"))
     return sanitized
+
+
+# ---------------------------------------------------------------------------
+# OAuth CSRF protection: one-time `state` tokens bound to each authorization
+# request. The callback rejects any redirect whose state is missing, unknown,
+# expired, or already used.
+# ---------------------------------------------------------------------------
+_OAUTH_STATE_TTL_SEC = 600  # 10 minutes
+_oauth_states: Dict[str, float] = {}
+
+
+def _issue_oauth_state() -> str:
+    now = time.time()
+    # Prune expired entries opportunistically
+    for token, issued in list(_oauth_states.items()):
+        if now - issued > _OAUTH_STATE_TTL_SEC:
+            _oauth_states.pop(token, None)
+    token = secrets.token_urlsafe(32)
+    _oauth_states[token] = now
+    return token
+
+
+def _consume_oauth_state(state: Optional[str]) -> bool:
+    if not state:
+        return False
+    issued = _oauth_states.pop(state, None)
+    if issued is None:
+        return False
+    return (time.time() - issued) <= _OAUTH_STATE_TTL_SEC
 
 @router.get("/status")
 def get_youtube_status():
@@ -94,15 +126,31 @@ def get_connect_url(request: Request, redirect_uri: Optional[str] = None):
         redirect_uri = f"{base_url}/api/v1/youtube/oauth-callback"
 
     try:
-        url = get_authorization_url(redirect_uri=redirect_uri)
-        return {"auth_url": url, "redirect_uri": redirect_uri}
+        state = _issue_oauth_state()
+        url = get_authorization_url(redirect_uri=redirect_uri, state=state)
+        return {"auth_url": url, "redirect_uri": redirect_uri, "state": state}
     except Exception as e:
         logger.error(f"Failed to create auth url: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.get("/oauth-callback", response_class=HTMLResponse)
-def oauth_callback(code: Optional[str] = Query(None), error: Optional[str] = Query(None), request: Request = None):
+def oauth_callback(code: Optional[str] = Query(None), error: Optional[str] = Query(None), state: Optional[str] = Query(None), request: Request = None):
     """Handles OAuth redirect from Google, exchanges token, and notifies frontend."""
+    if not _consume_oauth_state(state):
+        return HTMLResponse(
+            content="""
+            <!DOCTYPE html>
+            <html>
+            <head><title>Authorization Failed</title></head>
+            <body style="font-family:sans-serif; text-align:center; padding:50px; background:#111; color:#fff;">
+                <h2 style="color:#ef4444;">Invalid or expired authorization request</h2>
+                <p>This YouTube connection link is invalid, expired, or was already used. Please start a new connection from the Studio dashboard.</p>
+                <button onclick="window.close()" style="padding:10px 20px; background:#333; color:#fff; border:none; border-radius:6px; cursor:pointer;">Close Window</button>
+            </body>
+            </html>
+            """,
+            status_code=400
+        )
     if error:
         return HTMLResponse(
             content=f"""
@@ -111,7 +159,7 @@ def oauth_callback(code: Optional[str] = Query(None), error: Optional[str] = Que
             <head><title>Authorization Failed</title></head>
             <body style="font-family:sans-serif; text-align:center; padding:50px; background:#111; color:#fff;">
                 <h2 style="color:#ef4444;">Authorization Cancelled or Failed</h2>
-                <p>{error}</p>
+                <p>{html.escape(error, quote=True)}</p>
                 <button onclick="window.close()" style="padding:10px 20px; background:#333; color:#fff; border:none; border-radius:6px; cursor:pointer;">Close Window</button>
             </body>
             </html>

@@ -42,3 +42,31 @@ When the user asks to analyze, review, or audit this project:
    - Inefficient database queries or potential memory leaks.
    - Duplicate or overly complex logic (`code-simplification`).
 3. Output a structured, prioritized Action Plan (Critical $\to$ High $\to$ Medium) so issues can be fixed incrementally via TDD.
+
+---
+
+## 4. Mandatory Security Directives (`SECURITY.md`)
+
+Before writing or modifying ANY code in this codebase, you MUST strictly adhere to the 10 Standing Security Rules defined in `SECURITY.md`:
+
+1. **Never return secrets to the browser:** API keys, client secrets, refresh tokens must never appear in any API response, log line, or error message. Return masked placeholders (`key_masked`) only.
+2. **Never hardcode a secret:** Keys live in `config/*.json`, `.env`, or the `API_TOKEN` env var — never in source code, never in chat/terminal output.
+3. **Every `/api/*` route requires the API token:** Handled by `app/main.py :: api_token_guard` (header `X-API-Token` or query `?token=`). Do not add exemptions without explicit authorization.
+4. **Escape all user-controlled output:** Anything interpolated into HTML must go through `html.escape(..., quote=True)`.
+5. **Enforce upload limits:** All file uploads must pass through `validate_uploaded_media()` + `save_upload_with_limit()`. Never use raw `shutil.copyfileobj`. Caps: 500 MB video / 50 MB audio.
+6. **Sanitize filenames in paths:** Never put `UploadFile.filename` directly into a path — always use `os.path.basename()` first.
+7. **Clean up temp files:** Every endpoint that creates job-scoped files must call `cleanup_job_temp_files(job_id)` in a `finally` block.
+8. **No silent failures:** Never write `except Exception: pass` (except `os.remove` cleanup guards). Log with `log_event(msg, "WARNING")` with failure details and fallback path.
+9. **No blocking I/O on the event loop:** Sync HTTP, subprocess, or filesystem work inside `async` endpoints must be wrapped in `await asyncio.to_thread(...)`.
+10. **Pin dependencies:** `requirements.txt` must use `~=` compatible-release pins.
+
+### Mandatory Post-Implementation Security Review ("Session-End Security Audit")
+Whenever the user requests a security review or "session-end security audit", act as an attacker (not a feature tester) and run through the 8 mandatory checks:
+- Check for leaked secrets/tokens/internal paths in JSON/responses.
+- Verify user inputs are escaped and paths basename-sanitized.
+- Verify upload limits and temp-file `finally` cleanup.
+- Confirm no silent exception swallows.
+- Confirm async non-blocking execution (`asyncio.to_thread`).
+- Verify dependencies are pinned with `~=`.
+- Verify the full automated test suite passes (`pytest tests/`).
+

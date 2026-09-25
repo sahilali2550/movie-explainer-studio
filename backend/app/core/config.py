@@ -182,3 +182,78 @@ AUDIO_MODES: Dict[str, Dict[str, Any]] = {
     }
 }
 
+
+# ---------------------------------------------------------------------------
+# SECURITY: API token (auto-generated once, persisted with restricted perms).
+# The frontend served by this server gets the token injected automatically;
+# external API clients must send it via the X-API-Token header or ?token=.
+# Override with the API_TOKEN environment variable.
+# ---------------------------------------------------------------------------
+import secrets as _secrets
+import time as _time
+
+API_TOKEN_FILE = STORAGE_DIR / ".api_token"
+
+def _load_or_create_api_token() -> str:
+    env_token = os.getenv("API_TOKEN", "").strip()
+    if env_token:
+        return env_token
+    try:
+        if API_TOKEN_FILE.exists():
+            saved = API_TOKEN_FILE.read_text(encoding="utf-8").strip()
+            if saved:
+                return saved
+    except OSError:
+        pass
+    token = _secrets.token_urlsafe(32)
+    try:
+        API_TOKEN_FILE.write_text(token, encoding="utf-8")
+        os.chmod(API_TOKEN_FILE, 0o600)
+    except OSError:
+        pass
+    return token
+
+API_TOKEN = _load_or_create_api_token()
+
+# ---------------------------------------------------------------------------
+# Temp-file lifecycle: every render job scatters intermediate files across
+# TEMP_DIR / UPLOADS_DIR. These helpers guarantee per-job cleanup (called from
+# endpoint `finally` blocks) plus a startup purge of stale crash leftovers.
+# ---------------------------------------------------------------------------
+
+def cleanup_job_temp_files(job_id: str) -> int:
+    """Deletes every temp/upload file belonging to `job_id`. Returns count removed."""
+    if not job_id or len(job_id) < 4:
+        return 0
+    removed = 0
+    for folder in (TEMP_DIR, UPLOADS_DIR):
+        try:
+            for entry in folder.iterdir():
+                if entry.is_file() and job_id in entry.name:
+                    try:
+                        entry.unlink()
+                        removed += 1
+                    except OSError:
+                        pass
+        except OSError:
+            pass
+    return removed
+
+
+def purge_stale_temp_files(max_age_hours: float = 24.0) -> int:
+    """Deletes temp/upload files older than `max_age_hours` (crash leftovers)."""
+    cutoff = _time.time() - max_age_hours * 3600
+    removed = 0
+    for folder in (TEMP_DIR, UPLOADS_DIR):
+        try:
+            for entry in folder.iterdir():
+                if entry.is_file() and entry.name != ".api_token":
+                    try:
+                        if entry.stat().st_mtime < cutoff:
+                            entry.unlink()
+                            removed += 1
+                    except OSError:
+                        pass
+        except OSError:
+            pass
+    return removed

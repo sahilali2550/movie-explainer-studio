@@ -92,6 +92,16 @@ def load_ai_settings() -> Dict[str, Any]:
     return cfg
 
 
+def _is_valid_new_key(val: Optional[str]) -> bool:
+    """Returns True if the key string is a genuine new key and not masked or non-ascii."""
+    if not val:
+        return False
+    s = val.strip()
+    if not s or s == "***" or s.startswith("...") or any(ord(c) > 127 for c in s):
+        return False
+    return True
+
+
 def save_ai_settings(
     provider: Optional[str] = None,
     nine_router_url: Optional[str] = None,
@@ -112,28 +122,28 @@ def save_ai_settings(
     if provider and provider in cfg["providers"]:
         cfg["active_provider"] = provider
 
-    if nine_router_url is not None:
-        cfg["providers"]["9router"]["url"] = nine_router_url.rstrip("/")
-    if nine_router_key is not None:
+    if nine_router_url is not None and nine_router_url.strip():
+        cfg["providers"]["9router"]["url"] = nine_router_url.strip().rstrip("/")
+    if _is_valid_new_key(nine_router_key):
         cfg["providers"]["9router"]["key"] = nine_router_key.strip()
-    if nine_router_combo is not None:
+    if nine_router_combo is not None and nine_router_combo.strip():
         cfg["providers"]["9router"]["model"] = nine_router_combo.strip()
 
-    if gemini_key is not None:
+    if _is_valid_new_key(gemini_key):
         cfg["providers"]["gemini"]["key"] = gemini_key.strip()
-    if gemini_model is not None:
+    if gemini_model is not None and gemini_model.strip():
         cfg["providers"]["gemini"]["model"] = gemini_model.strip()
 
-    if openai_key is not None:
+    if _is_valid_new_key(openai_key):
         cfg["providers"]["openai"]["key"] = openai_key.strip()
-    if openai_model is not None:
+    if openai_model is not None and openai_model.strip():
         cfg["providers"]["openai"]["model"] = openai_model.strip()
 
-    if custom_url is not None:
-        cfg["providers"]["custom"]["url"] = custom_url.rstrip("/")
-    if custom_key is not None:
+    if custom_url is not None and custom_url.strip():
+        cfg["providers"]["custom"]["url"] = custom_url.strip().rstrip("/")
+    if _is_valid_new_key(custom_key):
         cfg["providers"]["custom"]["key"] = custom_key.strip()
-    if custom_model is not None:
+    if custom_model is not None and custom_model.strip():
         cfg["providers"]["custom"]["model"] = custom_model.strip()
 
     try:
@@ -178,7 +188,7 @@ def test_provider_connection(
     p_info = cfg["providers"].get(provider, {})
 
     target_url = (url or p_info.get("url", "")).rstrip("/")
-    target_key = key if key is not None else p_info.get("key", "")
+    target_key = key.strip() if _is_valid_new_key(key) else p_info.get("key", "")
     target_model = model or p_info.get("model", "")
 
     t0 = time.time()

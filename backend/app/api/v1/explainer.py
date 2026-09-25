@@ -12,7 +12,8 @@ from fastapi.responses import JSONResponse, FileResponse
 from app.core.config import (
     SUPPORTED_LANGUAGES, STORY_PERSONAS, MOOD_THEMES,
     CONTENT_GENRES, AUDIO_MODES,
-    UPLOADS_DIR, OUTPUTS_DIR, TEMP_DIR, THUMBNAILS_DIR
+    UPLOADS_DIR, OUTPUTS_DIR, TEMP_DIR, THUMBNAILS_DIR,
+    cleanup_job_temp_files
 )
 from app.core.logger import log_event, EngineLogger
 from app.services.script_engine import ScriptEngine
@@ -31,9 +32,10 @@ ALLOWED_VIDEO_EXTS = {".mp4", ".mkv", ".mov", ".avi", ".webm"}
 ALLOWED_AUDIO_EXTS = {".mp3", ".wav", ".aac", ".m4a", ".ogg"}
 
 def validate_uploaded_media(file: Optional[UploadFile], is_video: bool = True):
-    """Validates extension of uploaded video/audio file."""
+    """Validates extension and declared size of uploaded video/audio file."""
     if not file or not file.filename:
         return
+    max_bytes = MAX_VIDEO_BYTES if is_video else MAX_AUDIO_BYTES
     ext = os.path.splitext(file.filename)[1].lower()
     allowed = ALLOWED_VIDEO_EXTS if is_video else ALLOWED_AUDIO_EXTS
     if ext not in allowed:
@@ -41,6 +43,43 @@ def validate_uploaded_media(file: Optional[UploadFile], is_video: bool = True):
             status_code=400,
             detail=f"Unsupported file format: '{ext}'. Allowed: {', '.join(sorted(allowed))}"
         )
+    # Pre-check the client-declared size (Content-Length). The streaming
+    # writer below re-verifies the actual bytes as a second layer.
+    declared = getattr(file, "size", None)
+    if declared is not None and declared > max_bytes:
+        raise HTTPException(
+            status_code=413,
+            detail=f"File too large: '{file.filename}' exceeds the {max_bytes // (1024 * 1024)} MB limit."
+        )
+
+
+def save_upload_with_limit(upload_file: UploadFile, dest_path: str, max_bytes: int) -> str:
+    """
+    Streams an uploaded file to disk in chunks, aborting with HTTP 413 if the
+    actual byte count exceeds max_bytes. Removes any partial file on rejection.
+    """
+    total = 0
+    try:
+        with open(dest_path, "wb") as buffer:
+            while True:
+                chunk = upload_file.file.read(1024 * 1024)
+                if not chunk:
+                    break
+                total += len(chunk)
+                if total > max_bytes:
+                    raise HTTPException(
+                        status_code=413,
+                        detail=f"File too large: '{upload_file.filename}' exceeds the {max_bytes // (1024 * 1024)} MB limit."
+                    )
+                buffer.write(chunk)
+    except HTTPException:
+        try:
+            if os.path.exists(dest_path):
+                os.remove(dest_path)
+        except OSError:
+            pass
+        raise
+    return dest_path
 
 @router.get("/logs")
 def get_live_logs():
@@ -100,6 +139,8 @@ def get_ai_config():
             p_data["key_masked"] = f"{k[:5]}...{k[-4:]}" if len(k) > 10 else "***"
         else:
             p_data["key_masked"] = ""
+        # SECURITY: never expose the raw API key to the browser.
+        p_data.pop("key", None)
     return sanitized
 
 @router.post("/ai-config")
@@ -204,17 +245,19 @@ async def preview_clone_endpoint(
     job_id = str(uuid.uuid4())[:8]
     sample_path = str(TEMP_DIR / f"sample_upload_{job_id}{ext}")
 
-    with open(sample_path, "wb") as buffer:
-        shutil.copyfileobj(clone_sample_file.file, buffer)
+    save_upload_with_limit(clone_sample_file, sample_path, MAX_AUDIO_BYTES)
 
-    preview_file = await VoiceEngine.generate_cloned_preview(sample_path, language=language)
-    if preview_file:
-        return {
-            "success": True,
-            "preview_url": f"/outputs/temp/{preview_file}",
-            "sample_path": sample_path
-        }
-    raise HTTPException(status_code=500, detail="Could not generate cloned voice audition sample.")
+    try:
+        preview_file = await VoiceEngine.generate_cloned_preview(sample_path, language=language)
+        if preview_file:
+            return {
+                "success": True,
+                "preview_url": f"/outputs/temp/{preview_file}",
+                "sample_path": sample_path
+            }
+        raise HTTPException(status_code=500, detail="Could not generate cloned voice audition sample.")
+    finally:
+        cleanup_job_temp_files(job_id)
 
 @router.post("/instant-thumbnails")
 async def instant_thumbnails_endpoint(
@@ -238,8 +281,7 @@ async def instant_thumbnails_endpoint(
     try:
         if local_file and local_file.filename:
             log_event(f"📁 Processing local video file: {local_file.filename}", "INFO")
-            with open(raw_video_path, "wb") as buffer:
-                shutil.copyfileobj(local_file.file, buffer)
+            save_upload_with_limit(local_file, raw_video_path, MAX_VIDEO_BYTES)
             movie_title = os.path.splitext(local_file.filename)[0]
         elif url:
             log_event(f"🌐 Fetching highlight frames from YouTube: {url[:50]}...", "INFO")
@@ -257,17 +299,18 @@ async def instant_thumbnails_endpoint(
                 craft_cinematic_thumbnail_prompt,
                 generate_ai_image_with_9router
             )
-            if is_ninerouter_available():
+            if await asyncio.to_thread(is_ninerouter_available):
                 prompt = craft_cinematic_thumbnail_prompt(
                     title=movie_title,
                     plot_summary=plot_summary[:400] if plot_summary else movie_title,
                     genre="movie_recap"
                 )
                 log_event("🎨 Generating 9Router photorealistic cinema poster thumbnail...", "INFO")
-                ai_image_path = generate_ai_image_with_9router(
-                    prompt=prompt,
-                    size="1280x720",
-                    output_dir=str(THUMBNAILS_DIR)
+                ai_image_path = await asyncio.to_thread(
+                    generate_ai_image_with_9router,
+                    prompt,
+                    "1280x720",
+                    str(THUMBNAILS_DIR),
                 )
                 if ai_image_path and os.path.exists(ai_image_path):
                     log_event("✨ 9Router AI Photorealistic Cinema Poster generated successfully!", "SUCCESS")
@@ -297,6 +340,7 @@ async def instant_thumbnails_endpoint(
         if os.path.exists(raw_video_path):
             try: os.remove(raw_video_path)
             except Exception: pass
+        cleanup_job_temp_files(job_id)
 
 @router.get("/config")
 def get_explainer_config():
@@ -540,8 +584,8 @@ async def render_video_endpoint(
                 if subs_raw:
                     parsed_trans = VideoEngine.parse_raw_transcript_text(subs_raw)
                     dialogue_timeline = parsed_trans.get("dialogue_timeline", [])
-            except Exception:
-                pass
+            except Exception as e:
+                log_event(f"⚠️ Subtitle/dialogue extraction failed, continuing without dialogue timeline: {e}", "WARNING")
 
         clean_narration, scene_ranges, scene_subs = ScriptEngine.parse_storyboard(script_text)
         scene_blocks = ScriptEngine.parse_storyboard_blocks(script_text, dialogue_timeline=dialogue_timeline)
@@ -561,15 +605,13 @@ async def render_video_endpoint(
         if voice_mode == "custom_audio" and custom_audio_file and custom_audio_file.filename:
             ext = os.path.splitext(custom_audio_file.filename)[1].lower() or ".mp3"
             custom_target = str(TEMP_DIR / f"{job_id}_custom_audio{ext}")
-            with open(custom_target, "wb") as buffer:
-                shutil.copyfileobj(custom_audio_file.file, buffer)
+            save_upload_with_limit(custom_audio_file, custom_target, MAX_AUDIO_BYTES)
             speech_path = custom_target
             log_event(f"📁 Using pre-recorded custom audio file from PC: {custom_audio_file.filename}", "INFO")
         elif voice_mode == "clone" and clone_sample_file and clone_sample_file.filename:
             ext = os.path.splitext(clone_sample_file.filename)[1].lower() or ".mp3"
             sample_path = str(TEMP_DIR / f"{job_id}_clone_sample{ext}")
-            with open(sample_path, "wb") as buffer:
-                shutil.copyfileobj(clone_sample_file.file, buffer)
+            save_upload_with_limit(clone_sample_file, sample_path, MAX_AUDIO_BYTES)
             log_event("⚡ Synthesizing script using custom AI Voice Clone profile...", "INFO")
             clone_ok = await VoiceEngine.synthesize_cloned_story(clean_narration, language, speech_path, rate=rate_val)
             if not clone_ok or not os.path.exists(speech_path):
@@ -597,8 +639,7 @@ async def render_video_endpoint(
         # 3. Ingest Video Source with Bulletproof Footage Integrity
         if local_file and local_file.filename:
             log_event(f"📁 Ingesting local video file: {local_file.filename}", "INFO")
-            with open(raw_video_path, "wb") as buffer:
-                shutil.copyfileobj(local_file.file, buffer)
+            save_upload_with_limit(local_file, raw_video_path, MAX_VIDEO_BYTES)
             movie_title = os.path.splitext(local_file.filename)[0]
         elif url:
             log_event("🌐 Ensuring footage integrity from YouTube...", "INFO")
@@ -705,7 +746,7 @@ async def render_video_endpoint(
                 craft_cinematic_thumbnail_prompt,
                 generate_ai_image_with_9router
             )
-            if is_ninerouter_available(timeout_sec=3.0):
+            if await asyncio.to_thread(is_ninerouter_available, 3.0):
                 if scene_ranges:
                     mock_beats = [
                         {
@@ -715,10 +756,11 @@ async def render_video_endpoint(
                         }
                         for i, (s, e) in enumerate(scene_ranges)
                     ]
-                    strategy = generate_ai_thumbnail_strategy_with_9router(
+                    strategy = await asyncio.to_thread(
+                        generate_ai_thumbnail_strategy_with_9router,
                         title=movie_title,
                         story_beats=mock_beats,
-                        target_lang=language
+                        target_lang=language,
                     )
                     if strategy and "best_timestamp_sec" in strategy:
                         ai_target_timestamps = [float(strategy["best_timestamp_sec"])]
@@ -785,6 +827,8 @@ async def render_video_endpoint(
             if p and os.path.exists(p):
                 try: os.remove(p)
                 except Exception: pass
+        # Catch-all: any other job-scoped temp/upload leftovers
+        cleanup_job_temp_files(job_id)
 
 
 @router.post("/update-thumbnail")
@@ -857,8 +901,8 @@ async def render_batch_endpoint(
             if subs_raw:
                 parsed_trans = VideoEngine.parse_raw_transcript_text(subs_raw)
                 dialogue_timeline = parsed_trans.get("dialogue_timeline", [])
-        except Exception:
-            pass
+        except Exception as e:
+            log_event(f"⚠️ [Batch] Subtitle/dialogue extraction failed for job {job_id}, continuing without it: {e}", "WARNING")
 
     # Parse pre-translated scripts and custom voices if provided
     pre_scripts: Dict[str, str] = {}
@@ -883,8 +927,7 @@ async def render_batch_endpoint(
 
     try:
         if local_file and local_file.filename:
-            with open(raw_video_path, "wb") as buffer:
-                shutil.copyfileobj(local_file.file, buffer)
+            save_upload_with_limit(local_file, raw_video_path, MAX_VIDEO_BYTES)
             movie_title = os.path.splitext(local_file.filename)[0]
         elif url:
             dl_ok = VideoEngine.download_youtube_video(url, raw_video_path)
@@ -994,8 +1037,8 @@ async def render_batch_endpoint(
                             try:
                                 from deep_translator import GoogleTranslator
                                 localized_script = GoogleTranslator(source="auto", target=lang).translate(script_text)
-                            except Exception:
-                                pass
+                            except Exception as e:
+                                log_event(f"⚠️ [Batch] Translation to '{lang}' failed, using original script: {e}", "WARNING")
 
                     clean_narr, _, _ = ScriptEngine.parse_storyboard(localized_script)
                     if not clean_narr:
@@ -1049,8 +1092,8 @@ async def render_batch_endpoint(
                             sf.write(f"TAGS:\n{', '.join(meta_pack.get('tags', []))}\n\n")
                             sf.write(f"HASHTAGS:\n{' '.join(meta_pack.get('hashtags', []))}\n\n")
                             sf.write(f"PINNED COMMENT:\n{meta_pack.get('pinned_comment', '')}\n")
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        log_event(f"⚠️ [Batch] Failed to write SEO pack file for '{lang}': {e}", "WARNING")
 
                     results_by_lang[lang] = {
                         "language": lang,
@@ -1231,6 +1274,8 @@ async def render_batch_endpoint(
         if os.path.exists(raw_video_path):
             try: os.remove(raw_video_path)
             except Exception: pass
+        # Catch-all: batch leftovers ({job_id}_{lang}_* etc.)
+        cleanup_job_temp_files(job_id)
 
 
 @router.get("/download-bundle-zip")
@@ -1346,8 +1391,8 @@ async def auto_detect_context_endpoint(
             info = VideoEngine.extract_youtube_info(url, str(TEMP_DIR), temp_id)
             hint = hint or info.get("title", "")
             raw_text = info.get("subtitles_text", "")
-        except Exception:
-            pass
+        except Exception as e:
+            log_event(f"⚠️ [Autopilot] YouTube info/hint extraction failed, continuing without it: {e}", "WARNING")
 
     context = AgentSwarmEngine.detective_agent(raw_text, hint)
     return {
@@ -1446,8 +1491,8 @@ async def run_autopilot_endpoint(
                 if subs_raw:
                     parsed_trans = VideoEngine.parse_raw_transcript_text(subs_raw)
                     dialogue_timeline = parsed_trans.get("dialogue_timeline", [])
-            except Exception:
-                pass
+            except Exception as e:
+                log_event(f"⚠️ [Autopilot] Subtitle/dialogue extraction failed for job {job_id}, continuing without it: {e}", "WARNING")
 
         clean_narration, scene_ranges, scene_subs = ScriptEngine.parse_storyboard(final_script)
         scene_blocks = ScriptEngine.parse_storyboard_blocks(final_script, dialogue_timeline=dialogue_timeline)
@@ -1480,9 +1525,9 @@ async def run_autopilot_endpoint(
 
         # Step 4: Ingest Video Source with Bulletproof Footage Integrity
         if local_file:
-            raw_video_path = str(TEMP_DIR / f"autopilot_local_{job_id}_{local_file.filename}")
-            with open(raw_video_path, "wb") as f:
-                shutil.copyfileobj(local_file.file, f)
+            safe_name = os.path.basename(local_file.filename or "upload.mp4")
+            raw_video_path = str(TEMP_DIR / f"autopilot_local_{job_id}_{safe_name}")
+            save_upload_with_limit(local_file, raw_video_path, MAX_VIDEO_BYTES)
         elif clean_url:
             log_event("🌐 [Autopilot] Ensuring footage integrity from YouTube...", "INFO")
             raw_video_path = await asyncio.to_thread(
@@ -1578,7 +1623,7 @@ async def run_autopilot_endpoint(
                     craft_cinematic_thumbnail_prompt,
                     generate_ai_image_with_9router
                 )
-                if is_ninerouter_available(timeout_sec=3.0):
+                if await asyncio.to_thread(is_ninerouter_available, 3.0):
                     prompt = craft_cinematic_thumbnail_prompt(
                         title=movie_title,
                         plot_summary=clean_narration[:400],
@@ -1638,5 +1683,7 @@ async def run_autopilot_endpoint(
             if p and os.path.exists(p):
                 try: os.remove(p)
                 except Exception: pass
+        # Catch-all: autopilot_local_* and other job leftovers
+        cleanup_job_temp_files(job_id)
 
 
