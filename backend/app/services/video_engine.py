@@ -995,6 +995,17 @@ class VideoEngine:
         return max(300.0, float(total_movie_dur) - credits_margin)
 
     @staticmethod
+    def clamp_safe_movie_start(movie_start: float, safe_movie_dur: float, narration_dur: float = 3.5) -> float:
+        """
+        Clamps movie_start strictly within safe storytelling window (leaving credits out)
+        without modulo wrap-around to early movie footage.
+        """
+        ms = max(0.0, float(movie_start))
+        if safe_movie_dur > 2.0 and ms >= safe_movie_dur - 1.0:
+            ms = round(max(0.0, safe_movie_dur - narration_dur - 1.0), 2)
+        return ms
+
+    @staticmethod
     def build_audio_locked_scene_clips(
         input_video: str,
         scene_blocks: List[Any],
@@ -1103,10 +1114,7 @@ class VideoEngine:
                         continue
 
                 # Clamp movie_start strictly within safe storytelling window (leaving credits out)
-                movie_start = max(0.0, float(block.movie_start))
-                if safe_movie_dur > 2.0 and movie_start >= safe_movie_dur - 1.0:
-                    safe_span = max(1.0, safe_movie_dur - narration_dur - 1.0)
-                    movie_start = round(movie_start % safe_span, 2)
+                movie_start = VideoEngine.clamp_safe_movie_start(block.movie_start, safe_movie_dur, narration_dur)
 
                 movie_end = min(max(movie_start + 1.0, float(block.movie_end)), safe_movie_dur)
                 movie_window = max(0.1, movie_end - movie_start)

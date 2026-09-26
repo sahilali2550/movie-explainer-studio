@@ -213,6 +213,32 @@ class ScriptEngine:
         return text
 
     @staticmethod
+    def _evaluate_block_importance(block_text: str) -> float:
+        """
+        Phase 1 Interim Heuristic for Content-Aware Block Evaluation:
+        1. Introduced in Phase 1 to replace the content-blind positional middle deletion (drop_idx = len//2).
+        2. Fully deterministic function evaluating narrative triggers, dialogue tags, and substantive text length.
+        3. Operates as an interim heuristic to preserve critical plot points during budget clamping.
+        4. Its keyword vocabulary (EN, UR, HI) is not a complete multilingual semantic model.
+        5. Comprehensive multilingual semantic narrative scoring belongs to a later phase.
+        """
+        if not block_text:
+            return 0.0
+        words = re.findall(r'\w+', block_text.lower(), flags=re.UNICODE)
+        if not words:
+            return 0.0
+        triggers = {
+            "secret", "killed", "mystery", "shock", "trap", "never", "nobody", "twisted", "died", "lie",
+            "revelation", "discover", "twist", "truth", "clue", "murder", "confront", "escape", "fight",
+            "victim", "alive", "faked", "frame", "courtroom", "betray", "mastermind",
+            "راز", "قتل", "دھوکہ", "خوفناک", "ہوش", "حیران", "خطرناک", "سازش", "انجام", "انکشاف",
+            "सच", "मौत", "धोखा", "रहस्य", "चौंकाने", "खतरनाक", "साजिश", "खुलासा"
+        }
+        kw_count = sum(1 for w in words if w in triggers)
+        has_dialogue = 1 if any(tag in block_text.lower() for tag in ["[dialogue_ref:", '"', '“']) else 0
+        return (kw_count * 10.0) + (has_dialogue * 15.0) + (len(words) * 0.5)
+
+    @staticmethod
     def clamp_script_word_budget(
         script_text: str,
         target_duration_mins: int = 3,
@@ -270,10 +296,17 @@ class ScriptEngine:
                     else:
                         retained_middle.append(b)
 
-                # If still over budget, drop least critical intermediate blocks from the middle
+                # If still over budget, drop least critical intermediate blocks via content-aware scoring
                 cur_total = p1_words + p2_words + sum(len(b.split()) for b in retained_middle)
                 while cur_total > max_words and len(retained_middle) > 1:
-                    drop_idx = len(retained_middle) // 2
+                    drop_idx = min(
+                        range(len(retained_middle)),
+                        key=lambda i: (
+                            ScriptEngine._evaluate_block_importance(retained_middle[i]),
+                            len(retained_middle[i].split()),
+                            -i
+                        )
+                    )
                     retained_middle.pop(drop_idx)
                     cur_total = p1_words + p2_words + sum(len(b.split()) for b in retained_middle)
 
@@ -788,6 +821,11 @@ class ScriptEngine:
                 if sc > best_score:
                     best_score = sc
                     best_cue_start = cue_start
+                elif sc == best_score and sc > 0 and best_cue_start is not None:
+                    # Tie-break: prefer candidate closer to block's contextual movie_start timestamp
+                    target_ts = float(getattr(block, "movie_start", 0.0))
+                    if abs(cue_start - target_ts) < abs(best_cue_start - target_ts):
+                        best_cue_start = cue_start
 
             if best_score > 0 and best_cue_start is not None:
                 anchor_start = max(prev_anchor, best_cue_start)
