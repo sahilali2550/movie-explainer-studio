@@ -633,8 +633,33 @@ class ScriptEngine:
             final_text, ranges, _ = ScriptEngine.parse_storyboard(raw_script)
             if final_text:
                 sentences = [s.strip() for s in re.split(r'[.!?۔।\n]+', final_text) if len(s.strip()) > 5]
+
+                # ── T-FIX: 3-Act Proportional Fallback ─────────────────────────
+                # If no [SCENE:] tags exist (e.g. plain ChatGPT text), build proportional
+                # ranges spread across Acts 1/2/3 of the movie instead of a single
+                # (0.0, 60.0) block that causes the full video to loop one clip.
                 if not ranges:
-                    ranges = [(0.0, 60.0)]
+                    n_scenes = max(4, len(sentences))
+                    movie_dur_guess = 5400.0  # assume ~90-min film as safe default
+                    # Act 1 (20%): clips from 2–20% of movie
+                    # Act 2 (60%): clips from 20–75% of movie
+                    # Act 3 (20%): clips from 75–92% of movie
+                    act_defs = [
+                        (int(n_scenes * 0.20), 0.02  * movie_dur_guess, 0.20 * movie_dur_guess),
+                        (int(n_scenes * 0.60), 0.20  * movie_dur_guess, 0.75 * movie_dur_guess),
+                        (n_scenes - int(n_scenes * 0.20) - int(n_scenes * 0.60),
+                         0.75 * movie_dur_guess, 0.92 * movie_dur_guess),
+                    ]
+                    ranges = []
+                    clip_dur = 4.5
+                    for act_count, act_start, act_end in act_defs:
+                        if act_count <= 0:
+                            continue
+                        step = (act_end - act_start) / max(1, act_count)
+                        for i in range(act_count):
+                            s = act_start + i * step
+                            ranges.append((round(s, 1), round(s + clip_dur, 1)))
+                # ── End T-FIX ──────────────────────────────────────────────────
 
                 step = len(sentences) / max(1, len(ranges))
                 for r_idx, (r_s, r_e) in enumerate(ranges):

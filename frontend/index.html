@@ -310,10 +310,18 @@
               <button id="btnClearScript" class="btn rounded-lg border border-line px-2 py-2 text-[10px] text-muted hover:text-white">Clear</button>
               <button id="btnFormatScript" class="btn rounded-lg border border-line px-2 py-2 text-[10px] text-muted hover:text-white">Format</button>
             </div>
-            <button id="btnCopyPrompt" type="button" class="btn mt-2.5 flex w-full items-center justify-center gap-1.5 rounded-lg border border-accent/30 bg-accent/10 px-2 py-1.5 text-[9px] font-semibold text-blue-200 hover:bg-accent/20" title="Copy ready prompt for free ChatGPT or Gemini web ($0 budget)">
+            <button id="btnCopyPrompt" type="button" class="btn mt-2.5 flex w-full items-center justify-center gap-1.5 rounded-lg border border-accent/30 bg-accent/10 px-2 py-1.5 text-[9px] font-semibold text-blue-200 hover:bg-accent/20" title="Copy expert dynamic prompt for free ChatGPT or Gemini web ($0 budget)">
               <span>📋</span>
               <span>Copy Web AI Prompt ($0)</span>
             </button>
+            <div class="mt-1.5 grid grid-cols-2 gap-1.5">
+              <a href="https://chatgpt.com" target="_blank" rel="noopener" class="btn flex items-center justify-center gap-1 rounded-lg border border-emerald-500/30 bg-emerald-500/10 px-2 py-1.5 text-[9px] font-semibold text-emerald-300 hover:bg-emerald-500/20">
+                🤖 Open ChatGPT
+              </a>
+              <a href="https://gemini.google.com" target="_blank" rel="noopener" class="btn flex items-center justify-center gap-1 rounded-lg border border-purple-500/30 bg-purple-500/10 px-2 py-1.5 text-[9px] font-semibold text-purple-300 hover:bg-purple-500/20">
+                ✨ Open Gemini
+              </a>
+            </div>
           </aside>
         </div>
 
@@ -1325,6 +1333,10 @@
         rFd.append("resolution",   $("resolutionSelect").value);
         rFd.append("watermark",    $("watermarkInput").value.trim());
 
+        // Pass pasted transcript so backend can anchor scenes to real dialogue timestamps
+        const pastedTranscript = $("transcriptPasteArea") ? $("transcriptPasteArea").value.trim() : "";
+        if (pastedTranscript) rFd.append("transcript_text", pastedTranscript);
+
         const renderRes = await fetch("/api/v1/explainer/render-video", { method: "POST", body: rFd });
         const renderData = await renderRes.json();
 
@@ -1613,26 +1625,118 @@
       }
     };
 
-    // Copy Prompt Helper for Zero-Budget Users ($0)
+    // Copy Prompt Helper — Dynamic Expert Prompt Generator ($0 budget)
     $("btnCopyPrompt").onclick = () => {
-      const promptText = `Act as an elite viral YouTube movie & drama explainer. Write a high-retention 4-minute narrative script for this movie story recap.
-Strict Requirements:
-1. Divide the narration across the full story into short scene clips (3 to 5 seconds each).
-2. Before every line of narration, write exact scene timestamps in brackets like:
-   [SCENE: 01:10 - 01:15]
-   First dramatic narration sentence here...
-   [SCENE: 05:30 - 05:35]
-   Second dramatic narration sentence here...
-3. Use simple, natural colloquial language with high suspense and emotional hooks.
-4. Do NOT include markdown code blocks, asterisks, or director notes in the spoken lines.
+      // ── 1. Read user selections ────────────────────────────────────────────
+      const langEl    = $("scriptLangSelect");
+      const lang      = langEl ? langEl.value : "en";
+      const langName  = langEl ? langEl.options[langEl.selectedIndex].text : "English";
+      const url       = ($("urlInput") && $("urlInput").value.trim()) || "";
+      const transcript = ($("transcriptPasteArea") && $("transcriptPasteArea").value.trim()) || "";
 
-Movie Plot / Dialogue:
-[PASTE YOUR MOVIE PLOT OR SUBTITLES HERE]`;
+      // ── 2. WPM table (language-aware) ─────────────────────────────────────
+      const wpmMap = { ur:120, ar:120, hi:140, ja:100, ko:100, th:90,
+                       zh:110, fa:120, he:120, ru:140, de:145, fr:140,
+                       es:145, pt:145, it:145, tr:140 };
+      const wpm = wpmMap[lang] || 145;
+
+      // ── 3. Speed multiplier ────────────────────────────────────────────────
+      const speedMul = selectedSpeed === "fast" ? 1.15 : selectedSpeed === "ultra_fast" ? 1.30 : 1.00;
+      const effectiveWpm = Math.round(wpm * speedMul);
+
+      // ── 4. Word count targets ──────────────────────────────────────────────
+      const targetWords = Math.round(effectiveWpm * selectedDuration);
+      const act1 = Math.round(targetWords * 0.20);
+      const act2 = Math.round(targetWords * 0.60);
+      const act3 = targetWords - act1 - act2;
+
+      // ── 5. Scene count ─────────────────────────────────────────────────────
+      const totalSeconds = selectedDuration * 60;
+      const sceneCount = Math.max(4, Math.round(totalSeconds / 4.5));
+
+      // ── 6. Build dialogue context block ───────────────────────────────────
+      let dialogueBlock = "";
+      if (transcript) {
+        const lines = transcript.split("\n").filter(l => l.trim());
+        // Keep up to 80 lines to avoid token overflow; mark start/end time
+        const kept = lines.slice(0, 80);
+        dialogueBlock = `\n\n## Movie Dialogue / Subtitle Timeline (use these timestamps for [SCENE:] tags):\n\`\`\`\n${kept.join("\n")}\n\`\`\``;
+        if (lines.length > 80) dialogueBlock += `\n(${lines.length - 80} more lines omitted — use the full timeline for context.)`;
+      } else if (url) {
+        dialogueBlock = `\n\n## Source Movie URL:\n${url}\n(Fetch the plot and dialogue from this source.)`;
+      } else {
+        dialogueBlock = `\n\n## Movie Plot / Dialogue:\n[PASTE YOUR MOVIE PLOT OR SUBTITLES HERE]`;
+      }
+
+      // ── 7. Format time helper ──────────────────────────────────────────────
+      const fmtTime = (s) => {
+        const m = Math.floor(s / 60), sec = Math.round(s % 60);
+        return `${String(m).padStart(2,"0")}:${String(sec).padStart(2,"0")}`;
+      };
+
+      // ── 8. Build act time boundaries for reference ─────────────────────────
+      const act1End = Math.round(totalSeconds * 0.20);
+      const act2End = Math.round(totalSeconds * 0.80);
+
+      // ── 9. Assemble the final expert prompt ───────────────────────────────
+      const promptText =
+`You are an elite, award-winning YouTube movie explainer writer. Your task is to produce a complete, high-retention ${selectedDuration}-minute explainer script in **${langName}**.
+
+## STRICT REQUIREMENTS
+
+### 1. Total Script Length
+- Target: **${targetWords} words** (based on ${effectiveWpm} WPM × ${selectedDuration} min${speedMul !== 1.00 ? ` at ${selectedSpeed.replace("_"," ")} voiceover speed` : ""})
+- Tolerance: ±3% (${Math.round(targetWords*0.97)}–${Math.round(targetWords*1.03)} words)
+- You MUST count words before submitting. If short, expand. If over, trim.
+
+### 2. Three-Act Structure
+| Act | Time Range | Words |
+|-----|-----------|-------|
+| Act 1 — Hook & Setup | ${fmtTime(0)} – ${fmtTime(act1End)} | **${act1} words** |
+| Act 2 — Rising Tension | ${fmtTime(act1End)} – ${fmtTime(act2End)} | **${act2} words** |
+| Act 3 — Climax & Resolution | ${fmtTime(act2End)} – ${fmtTime(totalSeconds)} | **${act3} words** |
+
+### 3. Scene Block Format — MANDATORY (every block must follow this EXACTLY)
+\`\`\`
+[SCENE: MM:SS - MM:SS]
+[DIALOGUE_REF: "exact short quote from the dialogue/subtitle above"]
+[VOICEOVER]
+Your narration text here — engaging, emotional, suspenseful...
+\`\`\`
+
+### 4. Scene Rules
+- Total scenes: **${sceneCount}** (one scene every ~4–5 seconds of screen time)
+- Each [SCENE:] timestamp must reference a real moment from the dialogue/subtitle timeline provided
+- Scene duration: 3–6 seconds each (e.g., [SCENE: 01:10 - 01:14])
+- Pick the most dramatic, visually rich moments for each scene cut
+- Scenes must flow chronologically through the full ${fmtTime(totalSeconds)} runtime
+
+### 5. Voiceover Style Rules
+- Language: **${langName}** — write entirely in ${langName}, no mixing
+- Tone: cinematic, suspenseful, emotional storytelling — NOT a Wikipedia summary
+- Open Act 1 with a shocking hook or question that grabs attention instantly
+- Use short punchy sentences (8–12 words max per sentence)
+- End Act 3 with a memorable closing line
+- NO markdown asterisks, NO director notes, NO chapter headers in [VOICEOVER] text
+- NO filler phrases like "In this video..." or "Don't forget to subscribe..."
+
+### 6. Output Rules
+- Output the scene blocks ONLY — no introduction, no explanation, no word count at the end
+- Start directly with [SCENE: 00:00 - 00:05]
+- Do NOT wrap output in code fences
+${dialogueBlock}`;
 
       navigator.clipboard.writeText(promptText).then(() => {
-        toast("📋 Web AI Prompt copied! Paste it in free ChatGPT or Gemini.", "success");
+        toast(`📋 Expert ${selectedDuration}-min ${langName} prompt copied! (${targetWords} words target). Open ChatGPT or Gemini below.`, "success");
       }).catch(() => {
-        toast("Prompt copied to clipboard!", "info");
+        // Fallback: create a temporary textarea to copy
+        const ta = document.createElement("textarea");
+        ta.value = promptText;
+        ta.style.position = "fixed"; ta.style.opacity = "0";
+        document.body.appendChild(ta);
+        ta.select(); document.execCommand("copy");
+        document.body.removeChild(ta);
+        toast("Prompt copied! Open ChatGPT or Gemini below.", "info");
       });
     };
 
@@ -1647,3 +1751,4 @@ Movie Plot / Dialogue:
   </script>
 </body>
 </html>
+
