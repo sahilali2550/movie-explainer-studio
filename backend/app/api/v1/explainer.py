@@ -588,7 +588,12 @@ async def render_video_endpoint(
                 log_event(f"⚠️ Subtitle/dialogue extraction failed, continuing without dialogue timeline: {e}", "WARNING")
 
         clean_narration, scene_ranges, scene_subs = ScriptEngine.parse_storyboard(script_text)
-        scene_blocks = ScriptEngine.parse_storyboard_blocks(script_text, dialogue_timeline=dialogue_timeline)
+        embedding_prov = ScriptEngine.get_configured_embedding_provider()
+        scene_blocks = ScriptEngine.parse_storyboard_blocks(
+            script_text,
+            dialogue_timeline=dialogue_timeline,
+            embedding_provider=embedding_prov
+        )
         if scene_blocks:
             scene_ranges = [(b.movie_start, b.movie_end) for b in scene_blocks]
         if not clean_narration:
@@ -956,7 +961,12 @@ async def render_batch_endpoint(
             await VoiceEngine.synthesize_speech(clean_base_narr, base_voice, base_speech_path, rate=rate_val, pitch="-12Hz")
             base_duration = VideoEngine.get_duration(base_speech_path) if os.path.exists(base_speech_path) else 60.0
             base_speech_cues = VoiceEngine.get_speech_cues(base_speech_path)
-            base_scene_blocks = ScriptEngine.parse_storyboard_blocks(base_script, dialogue_timeline=dialogue_timeline)
+            embedding_prov = ScriptEngine.get_configured_embedding_provider()
+            base_scene_blocks = ScriptEngine.parse_storyboard_blocks(
+                base_script,
+                dialogue_timeline=dialogue_timeline,
+                embedding_provider=embedding_prov
+            )
             if base_scene_blocks:
                 base_scene_blocks = ScriptEngine.assign_narration_timing(base_scene_blocks, base_duration, base_speech_cues)
 
@@ -1150,7 +1160,12 @@ async def render_batch_endpoint(
 
                     speech_dur = VideoEngine.get_duration(speech_path)
                     speech_cues = VoiceEngine.get_speech_cues(speech_path)
-                    loc_scene_blocks = ScriptEngine.parse_storyboard_blocks(localized_script, dialogue_timeline=dialogue_timeline)
+                    embedding_prov = ScriptEngine.get_configured_embedding_provider()
+                    loc_scene_blocks = ScriptEngine.parse_storyboard_blocks(
+                        localized_script,
+                        dialogue_timeline=dialogue_timeline,
+                        embedding_provider=embedding_prov
+                    )
                     if loc_scene_blocks:
                         loc_scene_blocks = ScriptEngine.assign_narration_timing(loc_scene_blocks, speech_dur, speech_cues)
 
@@ -1495,7 +1510,12 @@ async def run_autopilot_endpoint(
                 log_event(f"⚠️ [Autopilot] Subtitle/dialogue extraction failed for job {job_id}, continuing without it: {e}", "WARNING")
 
         clean_narration, scene_ranges, scene_subs = ScriptEngine.parse_storyboard(final_script)
-        scene_blocks = ScriptEngine.parse_storyboard_blocks(final_script, dialogue_timeline=dialogue_timeline)
+        embedding_prov = ScriptEngine.get_configured_embedding_provider()
+        scene_blocks = ScriptEngine.parse_storyboard_blocks(
+            final_script,
+            dialogue_timeline=dialogue_timeline,
+            embedding_provider=embedding_prov
+        )
         if scene_blocks:
             scene_ranges = [(b.movie_start, b.movie_end) for b in scene_blocks]
         if not clean_narration:

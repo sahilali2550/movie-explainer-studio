@@ -4,6 +4,7 @@ import json
 import math
 import hashlib
 import difflib
+import requests
 import unicodedata
 import urllib.request
 from dataclasses import dataclass
@@ -134,9 +135,16 @@ class StoryPlanItem:
 
 class EmbeddingProvider:
     """
-    Abstract Base Class for semantic embedding providers (Phase 5).
+    Abstract Base Class for semantic embedding providers (Phase 5 / Phase 5B).
     Decouples core business logic from specific vendors and ensures safe error handling.
     """
+    provider_id: str = "generic"
+    model_id: str = "default"
+
+    @property
+    def namespace(self) -> str:
+        return f"{self.provider_id}:{self.model_id}"
+
     def embed_text(self, text: str) -> Optional[List[float]]:
         """Embeds a single string into a vector. Returns list of floats or None on failure."""
         raise NotImplementedError
@@ -144,6 +152,149 @@ class EmbeddingProvider:
     def embed_batch(self, texts: List[str]) -> List[Optional[List[float]]]:
         """Embeds a batch of strings. Returns list of vectors (or None per item on failure)."""
         return [self.embed_text(t) for t in texts]
+
+
+class OpenAICompatibleEmbeddingProvider(EmbeddingProvider):
+    """
+    Production embedding provider utilizing standard OpenAI-compatible REST endpoints (Phase 5B).
+    Compatible with OpenAI (api.openai.com), 9Router (local proxy), Ollama, LocalAI, vLLM, or custom proxies.
+    Defensively validates input, HTTP responses, dimensions, and finite numbers without leaking credentials.
+    """
+    def __init__(
+        self,
+        base_url: str = "https://api.openai.com/v1",
+        api_key: str = "",
+        model_name: str = "text-embedding-3-small",
+        timeout: float = 10.0,
+        expected_dim: Optional[int] = None,
+        max_batch_size: int = 64,
+        provider_name: str = "openai_compatible"
+    ):
+        self.base_url = (base_url or "https://api.openai.com/v1").rstrip("/")
+        self.api_key = (api_key or "").strip()
+        self.model_name = (model_name or "text-embedding-3-small").strip()
+        self.timeout = max(1.0, float(timeout))
+        self.expected_dim = expected_dim
+        self.max_batch_size = max(1, min(2048, int(max_batch_size)))
+        self.provider_id = (provider_name or "openai_compatible").strip()
+        self.model_id = self.model_name
+
+        # Resolve endpoint
+        base = self.base_url
+        if base.endswith("/embeddings"):
+            self.endpoint = base
+        elif base.endswith("/v1"):
+            self.endpoint = f"{base}/embeddings"
+        else:
+            self.endpoint = f"{base}/v1/embeddings"
+
+    def _validate_vector(self, vec: Any) -> Optional[List[float]]:
+        if not isinstance(vec, (list, tuple)) or len(vec) == 0:
+            return None
+        if self.expected_dim is not None and len(vec) != self.expected_dim:
+            return None
+        clean: List[float] = []
+        for x in vec:
+            if not isinstance(x, (int, float)) or not math.isfinite(x):
+                return None
+            clean.append(float(x))
+        if self.expected_dim is None and clean:
+            self.expected_dim = len(clean)
+        return clean
+
+    def embed_text(self, text: str) -> Optional[List[float]]:
+        if not text or not str(text).strip():
+            return None
+        clean_text = str(text).strip()
+        headers = {"Content-Type": "application/json"}
+        if self.api_key:
+            headers["Authorization"] = f"Bearer {self.api_key}"
+
+        payload = {
+            "input": clean_text,
+            "model": self.model_name
+        }
+
+        try:
+            res = requests.post(self.endpoint, json=payload, headers=headers, timeout=self.timeout)
+            if res.status_code != 200:
+                print(f"[EmbeddingProvider Notice] Provider HTTP {res.status_code} ({self.provider_id})")
+                return None
+            data = res.json()
+            if not isinstance(data, dict):
+                return None
+            data_items = data.get("data", [])
+            if not isinstance(data_items, list) or not data_items:
+                return None
+            first_item = data_items[0]
+            if not isinstance(first_item, dict):
+                return None
+            raw_vec = first_item.get("embedding")
+            return self._validate_vector(raw_vec)
+        except Exception as e:
+            # Defensive logging without logging secrets or full text (Security Rule 1/2)
+            print(f"[EmbeddingProvider Notice] Request failed: {type(e).__name__} ({self.provider_id})")
+            return None
+
+    def embed_batch(self, texts: List[str]) -> List[Optional[List[float]]]:
+        if not texts:
+            return []
+
+        results: List[Optional[List[float]]] = [None] * len(texts)
+        valid_indices: List[int] = []
+        valid_texts: List[str] = []
+
+        for idx, t in enumerate(texts):
+            if t and str(t).strip():
+                valid_indices.append(idx)
+                valid_texts.append(str(t).strip())
+
+        if not valid_texts:
+            return results
+
+        headers = {"Content-Type": "application/json"}
+        if self.api_key:
+            headers["Authorization"] = f"Bearer {self.api_key}"
+
+        for chunk_start in range(0, len(valid_texts), self.max_batch_size):
+            chunk_end = chunk_start + self.max_batch_size
+            chunk_slice_texts = valid_texts[chunk_start:chunk_end]
+            chunk_orig_indices = valid_indices[chunk_start:chunk_end]
+
+            payload = {
+                "input": chunk_slice_texts,
+                "model": self.model_name
+            }
+
+            try:
+                res = requests.post(self.endpoint, json=payload, headers=headers, timeout=self.timeout)
+                if res.status_code != 200:
+                    print(f"[EmbeddingProvider Notice] Batch HTTP {res.status_code} on chunk [{chunk_start}:{chunk_end}]")
+                    continue
+                data = res.json()
+                if not isinstance(data, dict):
+                    continue
+                items = data.get("data", [])
+                if not isinstance(items, list):
+                    continue
+
+                indexed_vectors: Dict[int, List[float]] = {}
+                for itm_idx, itm in enumerate(items):
+                    if isinstance(itm, dict) and "embedding" in itm:
+                        pos = itm.get("index", itm_idx)
+                        if isinstance(pos, int):
+                            vec = self._validate_vector(itm.get("embedding"))
+                            if vec is not None:
+                                indexed_vectors[pos] = vec
+
+                for local_idx, orig_idx in enumerate(chunk_orig_indices):
+                    if local_idx in indexed_vectors:
+                        results[orig_idx] = indexed_vectors[local_idx]
+
+            except Exception as e:
+                print(f"[EmbeddingProvider Notice] Batch request failed on chunk [{chunk_start}:{chunk_end}]: {type(e).__name__}")
+
+        return results
 
 
 class DictEmbeddingProvider(EmbeddingProvider):
@@ -154,10 +305,14 @@ class DictEmbeddingProvider(EmbeddingProvider):
     def __init__(
         self,
         vector_map: Optional[Dict[str, List[float]]] = None,
-        default_dim: int = 4
+        default_dim: int = 4,
+        provider_name: str = "dict",
+        model_name: str = "mock"
     ):
         self.vector_map = vector_map or {}
         self.default_dim = default_dim
+        self.provider_id = provider_name
+        self.model_id = model_name
         self.failure_mode = False
         self.dimension_mismatch_mode = False
         self.malformed_mode = False
@@ -182,6 +337,11 @@ class DictEmbeddingProvider(EmbeddingProvider):
             if k.lower() in clean_lower or clean_lower in k.lower():
                 return v
         return None
+
+    def embed_batch(self, texts: List[str]) -> List[Optional[List[float]]]:
+        if self.failure_mode:
+            raise RuntimeError("Simulated embedding provider failure")
+        return [self.embed_text(t) for t in texts]
 
 
 def cosine_similarity(v1: Any, v2: Any) -> float:
@@ -218,26 +378,29 @@ def cosine_similarity(v1: Any, v2: Any) -> float:
 
 class SemanticEmbeddingCache:
     """
-    Bounded in-memory cache for dialogue cue embeddings (Phase 5).
-    Keys on SHA-256 hash of normalized text to avoid recomputing vectors
-    for unchanged cues across repetitive scene blocks.
+    Bounded in-memory cache for dialogue cue embeddings (Phase 5 / Phase 5B).
+    Keys on SHA-256 hash of namespace (provider:model) and normalized text to avoid
+    cross-provider vector corruption while preserving bounded memory limits.
     """
     def __init__(self, max_size: int = 5000):
         self.max_size = max(1, max_size)
         self._cache: Dict[str, List[float]] = {}
         self._order: List[str] = []
 
-    def _key(self, text: str) -> str:
-        return hashlib.sha256(text.strip().encode("utf-8")).hexdigest()
+    def _key(self, text: str, namespace: str = "") -> str:
+        norm_txt = (text or "").strip()
+        norm_ns = (namespace or "").strip()
+        raw = f"{norm_ns}::{norm_txt}" if norm_ns else norm_txt
+        return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
-    def get(self, text: str) -> Optional[List[float]]:
-        k = self._key(text)
+    def get(self, text: str, namespace: str = "") -> Optional[List[float]]:
+        k = self._key(text, namespace=namespace)
         return self._cache.get(k)
 
-    def put(self, text: str, vec: List[float]) -> None:
+    def put(self, text: str, vec: List[float], namespace: str = "") -> None:
         if not vec:
             return
-        k = self._key(text)
+        k = self._key(text, namespace=namespace)
         if k in self._cache:
             self._cache[k] = vec
             return
@@ -246,6 +409,10 @@ class SemanticEmbeddingCache:
             self._cache.pop(oldest, None)
         self._cache[k] = vec
         self._order.append(k)
+
+    def clear(self) -> None:
+        self._cache.clear()
+        self._order.clear()
 
     def __len__(self) -> int:
         return len(self._cache)
@@ -1576,6 +1743,95 @@ STRICT GROUNDING RULES:
         }
 
     @staticmethod
+    def get_configured_embedding_provider() -> Optional[EmbeddingProvider]:
+        """
+        Factory to instantiate the production embedding provider if configured and enabled (Phase 5B).
+
+        Resolution order:
+        1. Explicit toggle: SEMANTIC_RETRIEVAL_ENABLED env var ("1", "true", "yes") or
+           "semantic_retrieval_enabled" in ai_settings.json.
+           If neither is truthy, returns None (semantic retrieval remains disabled).
+        2. Endpoint/Key discovery:
+           - EMBEDDING_BASE_URL (or active provider URL from ai_settings.json)
+           - EMBEDDING_API_KEY (or active provider key from ai_settings.json / OPENAI_API_KEY)
+           - EMBEDDING_MODEL (or provider model, default 'text-embedding-3-small')
+        3. Returns OpenAICompatibleEmbeddingProvider instance when enabled.
+        4. If credentials/config are missing or initialization fails:
+           Safely returns None without crashing the application.
+        """
+        try:
+            # 1. Check explicit enable toggle
+            env_enabled = os.environ.get("SEMANTIC_RETRIEVAL_ENABLED", "").strip().lower()
+
+            ai_cfg = {}
+            try:
+                from app.services.ai_router import load_ai_settings
+                ai_cfg = load_ai_settings()
+            except Exception:
+                pass
+
+            cfg_enabled = bool(ai_cfg.get("semantic_retrieval_enabled", False))
+
+            is_enabled = False
+            if env_enabled in ("1", "true", "yes", "on"):
+                is_enabled = True
+            elif env_enabled in ("0", "false", "no", "off"):
+                is_enabled = False
+            else:
+                is_enabled = cfg_enabled
+
+            if not is_enabled:
+                return None
+
+            # 2. Determine provider configuration
+            env_prov = os.environ.get("EMBEDDING_PROVIDER", "").strip()
+            active_prov = env_prov or ai_cfg.get("active_provider", "openai")
+            prov_details = ai_cfg.get("providers", {}).get(active_prov, {})
+
+            # Resolve Base URL
+            base_url = os.environ.get("EMBEDDING_BASE_URL", "").strip()
+            if not base_url:
+                if active_prov == "openai":
+                    base_url = "https://api.openai.com/v1"
+                else:
+                    base_url = prov_details.get("url", "http://127.0.0.1:20128/v1")
+
+            # Refine provider identity if URL points to a specific vendor
+            if not env_prov:
+                if "openai.com" in base_url.lower():
+                    active_prov = "openai"
+                elif "localhost:11434" in base_url.lower():
+                    active_prov = "ollama"
+                elif "127.0.0.1:20128" in base_url.lower() or "9router" in base_url.lower():
+                    active_prov = "9router"
+
+            # Resolve API Key
+            api_key = os.environ.get("EMBEDDING_API_KEY", "").strip()
+            if not api_key:
+                if active_prov == "openai":
+                    api_key = os.environ.get("OPENAI_API_KEY", "").strip() or prov_details.get("key", "").strip()
+                else:
+                    api_key = prov_details.get("key", "").strip()
+
+            # Resolve Model Name
+            model_name = os.environ.get("EMBEDDING_MODEL", "").strip()
+            if not model_name:
+                model_name = prov_details.get("embedding_model", "text-embedding-3-small").strip()
+
+            timeout = float(os.environ.get("EMBEDDING_TIMEOUT", "10.0"))
+
+            return OpenAICompatibleEmbeddingProvider(
+                base_url=base_url,
+                api_key=api_key,
+                model_name=model_name,
+                timeout=timeout,
+                provider_name=active_prov
+            )
+        except Exception as e:
+            print(f"[EmbeddingProvider Notice] Failed to initialize configured provider: {e}")
+            return None
+
+    @staticmethod
     def parse_storyboard_blocks(
         raw_script: str,
         dialogue_timeline: Optional[List[Dict[str, Any]]] = None,
@@ -1890,25 +2146,38 @@ STRICT GROUNDING RULES:
         n_blocks = len(blocks)
         nominal_spacing = timeline_span / n_blocks if n_blocks > 1 else max(30.0, timeline_span * 0.15)
 
-        # Phase 5: Pre-embed dialogue timeline cues if embedding provider is supplied
+        # Phase 5 / 5B: Pre-embed dialogue timeline cues using batch embedding and namespace-isolated cache
         cue_embeddings: List[Optional[List[float]]] = []
         if embedding_provider is not None:
             try:
-                for c in dialogue_timeline:
-                    txt = c.get("text", "")
+                namespace = getattr(embedding_provider, "namespace", "default")
+
+                # Step 1: Identify uncached cues needing batch embedding
+                uncached_to_fetch: List[Tuple[int, str]] = []
+                for c_idx, cue in enumerate(dialogue_timeline):
+                    txt = (cue.get("text") or "").strip()
+                    if txt:
+                        cached = _GLOBAL_EMBEDDING_CACHE.get(txt, namespace=namespace)
+                        if cached is None:
+                            uncached_to_fetch.append((c_idx, txt))
+
+                # Step 2: Batch embed uncached cues
+                if uncached_to_fetch:
+                    texts_to_embed = [item[1] for item in uncached_to_fetch]
+                    new_vectors = embedding_provider.embed_batch(texts_to_embed)
+                    for (c_idx, txt), vec in zip(uncached_to_fetch, new_vectors):
+                        if vec is not None and isinstance(vec, list):
+                            _GLOBAL_EMBEDDING_CACHE.put(txt, vec, namespace=namespace)
+
+                # Step 3: Populate cue_embeddings aligned 1:1 with dialogue_timeline
+                for cue in dialogue_timeline:
+                    txt = (cue.get("text") or "").strip()
                     if not txt:
                         cue_embeddings.append(None)
-                        continue
-                    cached = _GLOBAL_EMBEDDING_CACHE.get(txt)
-                    if cached is not None:
-                        cue_embeddings.append(cached)
                     else:
-                        v = embedding_provider.embed_text(txt)
-                        if v and isinstance(v, list):
-                            _GLOBAL_EMBEDDING_CACHE.put(txt, v)
-                            cue_embeddings.append(v)
-                        else:
-                            cue_embeddings.append(None)
+                        v = _GLOBAL_EMBEDDING_CACHE.get(txt, namespace=namespace)
+                        cue_embeddings.append(v)
+
             except Exception as e:
                 # Security Rule 8: log failure details and fallback
                 print(f"[SemanticRetrieval Notice] Cue embedding failed, falling back to lexical: {e}")
@@ -1939,7 +2208,15 @@ STRICT GROUNDING RULES:
             block_vec = None
             if embedding_provider is not None and getattr(block, "narration_text", ""):
                 try:
-                    block_vec = embedding_provider.embed_text(block.narration_text)
+                    namespace = getattr(embedding_provider, "namespace", "default")
+                    b_txt = block.narration_text.strip()
+                    cached_b = _GLOBAL_EMBEDDING_CACHE.get(b_txt, namespace=namespace)
+                    if cached_b is not None:
+                        block_vec = cached_b
+                    else:
+                        block_vec = embedding_provider.embed_text(b_txt)
+                        if block_vec is not None and isinstance(block_vec, list):
+                            _GLOBAL_EMBEDDING_CACHE.put(b_txt, block_vec, namespace=namespace)
                 except Exception as e:
                     print(f"[SemanticRetrieval Notice] Query embedding failed for block {b_idx}: {e}")
                     block_vec = None
