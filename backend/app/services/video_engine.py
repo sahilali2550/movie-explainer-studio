@@ -218,6 +218,180 @@ class VideoEngine:
         return "\n".join(lines)
 
     @staticmethod
+    def _get_block_narration_dur(block: Any) -> float:
+        """
+        Extracts authoritative narration duration for a scene block.
+        Precedence:
+        1. actual_duration (if block.is_authoritative and actual_duration > 0.0)
+        2. speech_dur (if speech_dur > 0.0)
+        3. narration_end - narration_start (if narration_end > narration_start)
+        4. actual_duration (if actual_duration > 0.0)
+        5. 3.5 (default minimum)
+        """
+        if block is None:
+            return 3.5
+
+        is_auth = block.get("is_authoritative", False) if isinstance(block, dict) else getattr(block, "is_authoritative", False)
+        act_dur = float(block.get("actual_duration", 0.0) if isinstance(block, dict) else getattr(block, "actual_duration", 0.0))
+        sp_dur = float(block.get("speech_dur", 0.0) if isinstance(block, dict) else getattr(block, "speech_dur", 0.0))
+        n_start = float(block.get("narration_start", 0.0) if isinstance(block, dict) else getattr(block, "narration_start", 0.0))
+        n_end = float(block.get("narration_end", 0.0) if isinstance(block, dict) else getattr(block, "narration_end", 0.0))
+
+        if is_auth and act_dur > 0.0:
+            return round(act_dur, 3)
+        if sp_dur > 0.0:
+            return round(sp_dur, 3)
+        if n_end > n_start:
+            return round(n_end - n_start, 3)
+        if act_dur > 0.0:
+            return round(act_dur, 3)
+        return 3.5
+
+    @staticmethod
+    def calculate_source_cut_plan(
+        scene_ranges: Optional[List[Tuple[float, float]]] = None,
+        total_movie_dur: float = 3600.0,
+        target_duration: float = 60.0,
+        micro_clip_dur: float = 3.8,
+        scene_blocks: Optional[List[Any]] = None
+    ) -> List[Tuple[float, float]]:
+        """
+        Alias for build_chronological_scene_map for source cut planning.
+        """
+        return VideoEngine.build_chronological_scene_map(
+            scene_ranges=scene_ranges,
+            total_movie_dur=total_movie_dur,
+            target_duration=target_duration,
+            micro_clip_dur=micro_clip_dur,
+            scene_blocks=scene_blocks
+        )
+
+    @staticmethod
+    def verify_timeline_drift(
+        scene_blocks: List[Any],
+        clip_durations: Optional[List[float]] = None,
+        tolerance_sec: float = 0.05
+    ) -> Dict[str, Any]:
+        """
+        Phase 4B Timeline & Synchronization Drift Verifier.
+        Validates that:
+        1. Each scene block's video duration matches authoritative narration duration within tolerance_sec.
+        2. Cumulative timeline is strictly contiguous (no gaps or overlaps between consecutive blocks).
+        3. Overall timeline drift |sum(clips) - sum(narration)| <= tolerance_sec.
+        """
+        if not scene_blocks:
+            return {
+                "is_aligned": True,
+                "total_drift": 0.0,
+                "max_scene_drift": 0.0,
+                "scene_count": 0,
+                "tolerance_sec": tolerance_sec,
+                "details": [],
+                "total_expected_duration": 0.0,
+                "total_actual_duration": 0.0,
+                "is_contiguous": True
+            }
+
+        details = []
+        is_contiguous = True
+        prev_end = 0.0
+        expected_durations = [VideoEngine._get_block_narration_dur(b) for b in scene_blocks]
+
+        for idx, b in enumerate(scene_blocks):
+            exp_dur = expected_durations[idx]
+            n_start = float(b.get("narration_start", 0.0) if isinstance(b, dict) else getattr(b, "narration_start", 0.0))
+            n_end = float(b.get("narration_end", 0.0) if isinstance(b, dict) else getattr(b, "narration_end", 0.0))
+
+            if idx == 0:
+                if abs(n_start) > tolerance_sec:
+                    is_contiguous = False
+            else:
+                if abs(n_start - prev_end) > tolerance_sec:
+                    is_contiguous = False
+
+            if n_end > n_start:
+                prev_end = n_end
+            else:
+                prev_end += exp_dur
+
+        if clip_durations is not None:
+            if len(clip_durations) != len(scene_blocks):
+                return {
+                    "is_aligned": False,
+                    "error": f"Clip count mismatch: {len(clip_durations)} clips vs {len(scene_blocks)} scene blocks",
+                    "total_drift": 999.0,
+                    "max_scene_drift": 999.0,
+                    "scene_count": len(scene_blocks),
+                    "tolerance_sec": tolerance_sec,
+                    "details": [],
+                    "total_expected_duration": round(sum(expected_durations), 3),
+                    "total_actual_duration": round(sum(clip_durations), 3),
+                    "is_contiguous": is_contiguous
+                }
+
+            diffs = []
+            for idx, (exp_dur, act_dur) in enumerate(zip(expected_durations, clip_durations)):
+                diff = abs(act_dur - exp_dur)
+                diffs.append(diff)
+                details.append({
+                    "scene_idx": idx,
+                    "expected_duration": round(exp_dur, 3),
+                    "actual_duration": round(act_dur, 3),
+                    "drift": round(diff, 4),
+                    "aligned": diff <= tolerance_sec
+                })
+
+            total_expected = sum(expected_durations)
+            total_actual = sum(clip_durations)
+            total_drift = abs(total_actual - total_expected)
+            max_drift = max(diffs) if diffs else 0.0
+            is_aligned = (total_drift <= tolerance_sec) and (max_drift <= tolerance_sec) and is_contiguous
+
+            return {
+                "is_aligned": is_aligned,
+                "total_drift": round(total_drift, 4),
+                "max_scene_drift": round(max_drift, 4),
+                "scene_count": len(scene_blocks),
+                "tolerance_sec": tolerance_sec,
+                "details": details,
+                "total_expected_duration": round(total_expected, 3),
+                "total_actual_duration": round(total_actual, 3),
+                "is_contiguous": is_contiguous
+            }
+        else:
+            diffs = []
+            for idx, b in enumerate(scene_blocks):
+                exp_dur = expected_durations[idx]
+                n_start = float(b.get("narration_start", 0.0) if isinstance(b, dict) else getattr(b, "narration_start", 0.0))
+                n_end = float(b.get("narration_end", 0.0) if isinstance(b, dict) else getattr(b, "narration_end", 0.0))
+                block_span = n_end - n_start if n_end > n_start else exp_dur
+                diff = abs(block_span - exp_dur)
+                diffs.append(diff)
+                details.append({
+                    "scene_idx": idx,
+                    "expected_duration": round(exp_dur, 3),
+                    "narration_span": round(block_span, 3),
+                    "drift": round(diff, 4),
+                    "aligned": diff <= tolerance_sec
+                })
+
+            total_expected = sum(expected_durations)
+            max_drift = max(diffs) if diffs else 0.0
+            is_aligned = (max_drift <= tolerance_sec) and is_contiguous
+
+            return {
+                "is_aligned": is_aligned,
+                "total_drift": round(max_drift, 4),
+                "max_scene_drift": round(max_drift, 4),
+                "scene_count": len(scene_blocks),
+                "tolerance_sec": tolerance_sec,
+                "details": details,
+                "total_expected_duration": round(total_expected, 3),
+                "total_actual_duration": round(total_expected, 3),
+                "is_contiguous": is_contiguous
+            }
+
+    @staticmethod
     def build_chronological_scene_map(
         scene_ranges: Optional[List[Tuple[float, float]]] = None,
         total_movie_dur: float = 3600.0,
@@ -240,7 +414,7 @@ class VideoEngine:
             cuts: List[Tuple[float, float]] = []
 
             for b in scene_blocks:
-                b_dur = getattr(b, "speech_dur", 0.0)
+                b_dur = VideoEngine._get_block_narration_dur(b)
                 if b_dur <= 0.0:
                     b_dur = max(2.5, target_duration / len(scene_blocks))
 
@@ -248,8 +422,10 @@ class VideoEngine:
                 n_clips = max(1, int(round(b_dur / micro_clip_dur)))
                 base_c_dur = b_dur / n_clips
 
-                m_start = max(0.0, min(total_movie_dur - 1.5, getattr(b, "movie_start", 0.0)))
-                m_end = max(m_start + 1.5, min(total_movie_dur, getattr(b, "movie_end", m_start + 5.0)))
+                raw_m_start = b.get("movie_start", 0.0) if isinstance(b, dict) else getattr(b, "movie_start", 0.0)
+                raw_m_end = b.get("movie_end", raw_m_start + 5.0) if isinstance(b, dict) else getattr(b, "movie_end", raw_m_start + 5.0)
+                m_start = max(0.0, min(total_movie_dur - 1.5, raw_m_start))
+                m_end = max(m_start + 1.5, min(total_movie_dur, raw_m_end))
                 span = max(1.0, m_end - m_start)
 
                 if span <= base_c_dur:
@@ -1051,7 +1227,7 @@ class VideoEngine:
         if not scene_blocks or not input_video or not os.path.exists(input_video):
             print("[AudioLockedSync] No scene blocks or input video — falling back to sample_timeline")
             total_dur = sum(
-                max(0.1, b.narration_end - b.narration_start) for b in (scene_blocks or [])
+                VideoEngine._get_block_narration_dur(b) for b in (scene_blocks or [])
             ) or 60.0
             if input_video and os.path.exists(input_video):
                 return VideoEngine.sample_timeline(
@@ -1072,22 +1248,19 @@ class VideoEngine:
         concat_file = os.path.join(temp_dir, f"{job_id}_alc_concat.txt")
 
         # Check if input_video is a selective compilation (selective footage length < max movie timestamps)
-        max_req_start = max((float(getattr(b, "movie_start", 0.0)) for b in scene_blocks), default=0.0)
+        max_req_start = max(((float(b["movie_start"]) if isinstance(b, dict) else float(getattr(b, "movie_start", 0.0))) for b in scene_blocks), default=0.0)
         is_selective_compilation = total_movie_dur < max_req_start and total_movie_dur > 0.0
 
         try:
             for idx, block in enumerate(scene_blocks):
-                narration_dur = round(getattr(block, "speech_dur", 0.0) or (block.narration_end - block.narration_start), 3)
-                if narration_dur <= 0.0:
-                    narration_dur = round(block.narration_end - block.narration_start, 3)
-                if narration_dur <= 0.0:
-                    narration_dur = 3.5  # absolute minimum
+                narration_dur = VideoEngine._get_block_narration_dur(block)
 
                 clip_out = os.path.join(temp_dir, f"{job_id}_alc_{idx}.mp4")
 
                 # If input_video is a selective compilation, cut using local timeline offset (Rule 2)
                 if is_selective_compilation:
-                    local_anchor = min(max(0.0, float(getattr(block, "narration_start", 0.0))), max(0.0, total_movie_dur - narration_dur))
+                    raw_n_start = block.get("narration_start", 0.0) if isinstance(block, dict) else getattr(block, "narration_start", 0.0)
+                    local_anchor = min(max(0.0, float(raw_n_start)), max(0.0, total_movie_dur - narration_dur))
                     avail = max(0.1, total_movie_dur - local_anchor)
                     cut_dur = min(narration_dur, avail)
                     gap = round(narration_dur - cut_dur, 3) if cut_dur < narration_dur else 0.0
@@ -1114,9 +1287,11 @@ class VideoEngine:
                         continue
 
                 # Clamp movie_start strictly within safe storytelling window (leaving credits out)
-                movie_start = VideoEngine.clamp_safe_movie_start(block.movie_start, safe_movie_dur, narration_dur)
+                raw_m_start = block.get("movie_start", 0.0) if isinstance(block, dict) else getattr(block, "movie_start", 0.0)
+                raw_m_end = block.get("movie_end", raw_m_start + 5.0) if isinstance(block, dict) else getattr(block, "movie_end", raw_m_start + 5.0)
+                movie_start = VideoEngine.clamp_safe_movie_start(raw_m_start, safe_movie_dur, narration_dur)
 
-                movie_end = min(max(movie_start + 1.0, float(block.movie_end)), safe_movie_dur)
+                movie_end = min(max(movie_start + 1.0, float(raw_m_end)), safe_movie_dur)
                 movie_window = max(0.1, movie_end - movie_start)
 
                 # ── Strategy selection ─────────────────────────────────────────
@@ -1133,16 +1308,16 @@ class VideoEngine:
                     mc_durs[-1] = round(narration_dur - sum(mc_durs[:-1]), 3)
 
                     # Center cuts around the anchored dialogue timestamp within safe movie duration
-                    scene_anchor = min(safe_movie_dur - narration_dur, movie_start)
+                    scene_anchor = max(0.0, min(max(0.0, safe_movie_dur - narration_dur), movie_start))
                     scene_end = min(safe_movie_dur, max(movie_end, scene_anchor + narration_dur))
                     actual_span = max(0.1, scene_end - scene_anchor)
 
                     if actual_span >= narration_dur:
                         max_offset = actual_span - mc_durs[0]
                         step = max_offset / max(1, n_cuts - 1) if n_cuts > 1 else 0.0
-                        cut_starts = [round(min(safe_movie_dur - mc_durs[k], scene_anchor + k * step), 3) for k in range(n_cuts)]
+                        cut_starts = [round(max(0.0, min(safe_movie_dur - mc_durs[k], scene_anchor + k * step)), 3) for k in range(n_cuts)]
                     else:
-                        cut_starts = [round(min(safe_movie_dur - mc_durs[k], scene_anchor + sum(mc_durs[:k])), 3) for k in range(n_cuts)]
+                        cut_starts = [round(max(0.0, min(safe_movie_dur - mc_durs[k], scene_anchor + sum(mc_durs[:k]))), 3) for k in range(n_cuts)]
 
                     # If speed_ratio < 0.5 (extension required), record the extended -to call for Option-C
                     extended_end = min(safe_movie_dur, movie_start + narration_dur)
@@ -1412,7 +1587,7 @@ class VideoEngine:
         # ── Global fallback ────────────────────────────────────────────────────
         print("[AudioLockedSync] Falling back to sample_timeline()")
         total_narration_dur = sum(
-            max(0.1, b.narration_end - b.narration_start) for b in scene_blocks
+            VideoEngine._get_block_narration_dur(b) for b in scene_blocks
         )
         return VideoEngine.sample_timeline(
             input_video, total_narration_dur, total_movie_dur, output_video, temp_dir, job_id
