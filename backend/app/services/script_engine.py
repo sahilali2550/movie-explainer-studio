@@ -22,6 +22,74 @@ class SceneBlock:
     dialogue_ref: str = ""       # exact dialogue quote or reference from source movie
 
 
+@dataclass
+class EvidencePacket:
+    """
+    Phase 3B Deterministic Evidence Packet.
+    Pairs each selected roadmap point directly to authoritative source dialogue,
+    bounded local context, act placement, and source traceability.
+    """
+    packet_id: str                      # unique sequence identifier (e.g. "EP-001")
+    movie_start: float                  # start timestamp in source video (seconds)
+    movie_end: float                    # end timestamp in source video (seconds)
+    source_text: str                    # verbatim dialogue / event text from source
+    act: str                            # narrative act ("Act 1", "Act 2A", "Act 2B", "Act 3", "Epilogue")
+    sequence_index: int                 # 0-indexed chronological sequence position
+    cue_index: Optional[int] = None     # index into original source cues array
+    context_before: str = ""            # bounded local source cues immediately prior
+    context_after: str = ""             # bounded local source cues immediately following
+    confidence: float = 1.0             # source match confidence (1.0 = direct verified source cue)
+    is_resolved: bool = True            # whether evidence successfully maps to source
+    metadata: Optional[Dict[str, Any]] = None  # optional match/traceability metadata
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "packet_id": self.packet_id,
+            "movie_start": self.movie_start,
+            "movie_end": self.movie_end,
+            "source_text": self.source_text,
+            "act": self.act,
+            "sequence_index": self.sequence_index,
+            "cue_index": self.cue_index,
+            "context_before": self.context_before,
+            "context_after": self.context_after,
+            "confidence": self.confidence,
+            "is_resolved": self.is_resolved,
+            "metadata": self.metadata or {}
+        }
+
+
+@dataclass
+class StoryPlanItem:
+    """
+    Phase 3B Structured Story Plan Item.
+    Intermediate planning representation linking sequence steps directly to EvidencePackets,
+    enforcing chronological progression, core actions, mentioned entities, and word budgets.
+    """
+    step: int                           # 1-indexed plan sequence step
+    source_timestamp: float             # seconds in source timeline
+    act: str                            # narrative act
+    evidence_ref: str                   # packet_id of underlying EvidencePacket (e.g. "EP-001")
+    core_event: str                     # concise event description strictly grounded in evidence
+    entities: List[str]                 # characters, locations, objects directly mentioned in source
+    narration_purpose: str              # structural role (e.g. "hook", "setup", "escalation", "climax", "resolution")
+    budget_words: int                   # allocated target spoken word count for this beat
+    is_inferred: bool = False           # flag indicating if any minimal connective inference was used
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "step": self.step,
+            "source_timestamp": self.source_timestamp,
+            "act": self.act,
+            "evidence_ref": self.evidence_ref,
+            "core_event": self.core_event,
+            "entities": self.entities,
+            "narration_purpose": self.narration_purpose,
+            "budget_words": self.budget_words,
+            "is_inferred": self.is_inferred
+        }
+
+
 class ScriptEngine:
     """
     Multilingual Storyboard & Narrative Generator for Movie Explainers.
@@ -579,21 +647,14 @@ class ScriptEngine:
         return f"{p1}\n\n[... Narrative Progression ...]\n\n{p2}\n\n[... Climax & Resolution ...]\n\n{p3}"
 
     @staticmethod
-    def compress_transcript_to_roadmap(
+    def _parse_source_cues(
         subs_text: str,
-        total_movie_dur: float = 3600.0,
-        max_points: Optional[int] = None,
-        target_output_dur_mins: Optional[int] = None,
         dialogue_timeline: Optional[List[Dict[str, Any]]] = None
-    ) -> str:
+    ) -> List[Dict[str, Any]]:
         """
-        Compresses source transcripts into a chronological, act-aware narrative roadmap (Phase 3A).
-        Guarantees full story arc coverage across all 5 narrative acts (beginning, midpoint, climax, ending)
-        with duration-aware density and deterministic, informativeness-driven cue selection.
+        Parses raw transcript or dialogue timeline into chronological cue objects.
+        Guarantees non-destructive Unicode preservation across Urdu, Hindi, Arabic, and all languages.
         """
-        if not subs_text and not dialogue_timeline:
-            return ""
-
         from app.services.video_engine import VideoEngine
 
         cues: List[Dict[str, Any]] = []
@@ -601,12 +662,12 @@ class ScriptEngine:
             cues = [dict(c) for c in dialogue_timeline if c.get("text", "").strip()]
         else:
             try:
-                res = VideoEngine.parse_raw_transcript_text(subs_text)
+                res = VideoEngine.parse_raw_transcript_text(subs_text or "")
                 cues = res.get("dialogue_timeline", [])
             except Exception:
                 cues = []
 
-            if not cues:
+            if not cues and subs_text:
                 ts_regex = re.compile(r'\[?((?:\d{1,2}:)?\d{1,3}:\d{2})\]?\s*(.*)')
                 for line in subs_text.splitlines():
                     l = line.strip()
@@ -625,10 +686,27 @@ class ScriptEngine:
                         if txt:
                             cues.append({"start": sec, "end": sec + 5.0, "text": txt})
 
-        if not cues:
-            return ScriptEngine.extract_balanced_transcript_sample(subs_text, max_chars=3500)
+        cues.sort(key=lambda x: float(x.get("start", 0.0)))
+        return cues
 
-        cues.sort(key=lambda x: x["start"])
+    @staticmethod
+    def select_roadmap_cues(
+        subs_text: str,
+        total_movie_dur: float = 3600.0,
+        max_points: Optional[int] = None,
+        target_output_dur_mins: Optional[int] = None,
+        dialogue_timeline: Optional[List[Dict[str, Any]]] = None
+    ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+        """
+        Extracts selected representative roadmap cues and all source cues across 5 narrative acts (Phase 3A/3B).
+        Returns (selected_cues, all_source_cues).
+        """
+        if not subs_text and not dialogue_timeline:
+            return [], []
+
+        cues = ScriptEngine._parse_source_cues(subs_text, dialogue_timeline)
+        if not cues:
+            return [], []
 
         # Determine target capacity (Phase 3A Step 4)
         if max_points is not None and max_points > 0:
@@ -719,6 +797,7 @@ class ScriptEngine:
         for i in range(5):
             q = quotas[i]
             cands = act_cues[i]
+            act_name = acts_def[i][0]
             if q <= 0 or not cands:
                 continue
             if len(cands) <= q:
@@ -726,7 +805,9 @@ class ScriptEngine:
                     k = round(float(c["start"]), 1)
                     if k not in seen_starts:
                         seen_starts.add(k)
-                        selected_cues.append(c)
+                        c_copy = dict(c)
+                        c_copy["act"] = act_name
+                        selected_cues.append(c_copy)
                 continue
 
             a_start = acts_def[i][1]
@@ -745,7 +826,9 @@ class ScriptEngine:
                     k = round(float(best_cue["start"]), 1)
                     if k not in seen_starts:
                         seen_starts.add(k)
-                        selected_cues.append(best_cue)
+                        c_copy = dict(best_cue)
+                        c_copy["act"] = act_name
+                        selected_cues.append(c_copy)
                 else:
                     sub_mid = sub_s + sub_step / 2.0
                     unselected = [(idx, c) for idx, c in enumerate(cands) if idx not in chosen_indices]
@@ -755,9 +838,39 @@ class ScriptEngine:
                         k = round(float(best_cue["start"]), 1)
                         if k not in seen_starts:
                             seen_starts.add(k)
-                            selected_cues.append(best_cue)
+                            c_copy = dict(best_cue)
+                            c_copy["act"] = act_name
+                            selected_cues.append(c_copy)
 
         selected_cues.sort(key=lambda x: float(x["start"]))
+        return selected_cues, cues
+
+    @staticmethod
+    def compress_transcript_to_roadmap(
+        subs_text: str,
+        total_movie_dur: float = 3600.0,
+        max_points: Optional[int] = None,
+        target_output_dur_mins: Optional[int] = None,
+        dialogue_timeline: Optional[List[Dict[str, Any]]] = None
+    ) -> str:
+        """
+        Compresses source transcripts into a chronological, act-aware narrative roadmap (Phase 3A).
+        Guarantees full story arc coverage across all 5 narrative acts (beginning, midpoint, climax, ending)
+        with duration-aware density and deterministic, informativeness-driven cue selection.
+        """
+        if not subs_text and not dialogue_timeline:
+            return ""
+
+        selected_cues, all_cues = ScriptEngine.select_roadmap_cues(
+            subs_text=subs_text,
+            total_movie_dur=total_movie_dur,
+            max_points=max_points,
+            target_output_dur_mins=target_output_dur_mins,
+            dialogue_timeline=dialogue_timeline
+        )
+
+        if not all_cues:
+            return ScriptEngine.extract_balanced_transcript_sample(subs_text, max_chars=3500)
 
         lines = []
         for c in selected_cues:
@@ -784,36 +897,7 @@ class ScriptEngine:
         Quality and auditing introspection helper for Phase 3A narrative roadmap coverage.
         Returns exact metrics for source event count, retained counts, act distributions, and boundaries.
         """
-        from app.services.video_engine import VideoEngine
-
-        cues: List[Dict[str, Any]] = []
-        if dialogue_timeline and len(dialogue_timeline) > 0:
-            cues = [dict(c) for c in dialogue_timeline if c.get("text", "").strip()]
-        else:
-            try:
-                res = VideoEngine.parse_raw_transcript_text(subs_text)
-                cues = res.get("dialogue_timeline", [])
-            except Exception:
-                cues = []
-            if not cues:
-                ts_regex = re.compile(r'\[?((?:\d{1,2}:)?\d{1,3}:\d{2})\]?\s*(.*)')
-                for line in subs_text.splitlines():
-                    l = line.strip()
-                    if not l:
-                        continue
-                    m = ts_regex.match(l)
-                    if m:
-                        ts_str = m.group(1)
-                        txt = m.group(2).strip()
-                        parts = ts_str.split(':')
-                        sec = 0.0
-                        if len(parts) == 2:
-                            sec = int(parts[0]) * 60.0 + float(parts[1])
-                        elif len(parts) == 3:
-                            sec = int(parts[0]) * 3600.0 + int(parts[1]) * 60.0 + float(parts[2])
-                        if txt:
-                            cues.append({"start": sec, "end": sec + 5.0, "text": txt})
-
+        cues = ScriptEngine._parse_source_cues(subs_text, dialogue_timeline)
         total_source_events = len(cues)
         roadmap_str = ScriptEngine.compress_transcript_to_roadmap(
             subs_text=subs_text,
@@ -871,6 +955,460 @@ class ScriptEngine:
             "climax_coverage": act_counts["act3"] > 0,
             "ending_coverage": act_counts["epilogue"] > 0,
             "roadmap_lines_count": len(lines),
+        }
+
+    # =========================================================================
+    # PHASE 3B — EVIDENCE PACKETS & GROUNDED STORY PLANNING
+    # =========================================================================
+
+    @staticmethod
+    def build_evidence_packets(
+        subs_text: str = "",
+        total_movie_dur: float = 3600.0,
+        target_output_dur_mins: Optional[int] = None,
+        max_points: Optional[int] = None,
+        dialogue_timeline: Optional[List[Dict[str, Any]]] = None,
+        selected_cues: Optional[List[Dict[str, Any]]] = None,
+        all_source_cues: Optional[List[Dict[str, Any]]] = None,
+        context_window_sec: float = 45.0,
+        max_context_cues: int = 2
+    ) -> List[Dict[str, Any]]:
+        """
+        Builds deterministic evidence packets from selected roadmap cues and original source dialogue (Phase 3B Step 3).
+        Each packet binds a roadmap beat directly to verbatim source text, bounded local context, and narrative act.
+        """
+        if selected_cues is None or all_source_cues is None:
+            selected_cues, all_source_cues = ScriptEngine.select_roadmap_cues(
+                subs_text=subs_text,
+                total_movie_dur=total_movie_dur,
+                max_points=max_points,
+                target_output_dur_mins=target_output_dur_mins,
+                dialogue_timeline=dialogue_timeline
+            )
+
+        if not selected_cues:
+            return []
+
+        packets: List[Dict[str, Any]] = []
+        for idx, cue in enumerate(selected_cues):
+            c_start = float(cue.get("start", 0.0))
+            c_end = float(cue.get("end", c_start + 5.0))
+            c_text = cue.get("text", "").strip()
+
+            # Locate matching authoritative cue in all_source_cues
+            matched_idx = None
+            if all_source_cues:
+                for s_i, sc in enumerate(all_source_cues):
+                    if sc is cue or (abs(float(sc.get("start", 0.0)) - c_start) < 0.05 and sc.get("text", "").strip() == c_text):
+                        matched_idx = s_i
+                        break
+
+            # Local bounded context extraction (Phase 3B Step 4)
+            context_before_list = []
+            context_after_list = []
+            is_resolved = (matched_idx is not None)
+            confidence = 1.0 if is_resolved else 0.0
+
+            if matched_idx is not None and all_source_cues:
+                start_lookback = max(0, matched_idx - max_context_cues)
+                for k in range(start_lookback, matched_idx):
+                    prior_cue = all_source_cues[k]
+                    if c_start - float(prior_cue.get("start", 0.0)) <= context_window_sec:
+                        context_before_list.append(prior_cue.get("text", "").replace("\n", " ").strip())
+
+                end_lookahead = min(len(all_source_cues), matched_idx + 1 + max_context_cues)
+                for k in range(matched_idx + 1, end_lookahead):
+                    next_cue = all_source_cues[k]
+                    if float(next_cue.get("start", 0.0)) - c_start <= context_window_sec:
+                        context_after_list.append(next_cue.get("text", "").replace("\n", " ").strip())
+
+            # Determine act assignment
+            act = cue.get("act", "")
+            if not act:
+                ratio = c_start / max(1.0, float(total_movie_dur))
+                if ratio < 0.20:
+                    act = "Act 1"
+                elif ratio < 0.45:
+                    act = "Act 2A"
+                elif ratio < 0.70:
+                    act = "Act 2B"
+                elif ratio < 0.90:
+                    act = "Act 3"
+                else:
+                    act = "Epilogue"
+
+            packet_obj = EvidencePacket(
+                packet_id=f"EP-{idx+1:03d}",
+                movie_start=c_start,
+                movie_end=c_end,
+                source_text=c_text,
+                act=act,
+                sequence_index=idx,
+                cue_index=matched_idx,
+                context_before=" | ".join(context_before_list) if context_before_list else "",
+                context_after=" | ".join(context_after_list) if context_after_list else "",
+                confidence=confidence,
+                is_resolved=is_resolved,
+                metadata={"source_duration": round(c_end - c_start, 2)}
+            )
+            packets.append(packet_obj.to_dict())
+
+        return packets
+
+    @staticmethod
+    def _extract_grounded_entities(text: str) -> List[str]:
+        """Extracts candidate character names, numbers, or key proper entities strictly from text."""
+        if not text:
+            return []
+        quoted = re.findall(r'["\']([^"\']{2,30})["\']', text)
+        codes = re.findall(r'\b(?:\d{2,6}|[A-Z]{2,}\d*)\b', text)
+        COMMON_STARTERS = {
+            'The', 'A', 'An', 'In', 'On', 'At', 'By', 'For', 'With', 'About',
+            'He', 'She', 'They', 'It', 'We', 'You', 'I', 'This', 'That', 'These',
+            'Those', 'When', 'Where', 'Why', 'How', 'What', 'Who', 'Then', 'Now',
+            'After', 'Before', 'Meanwhile', 'Suddenly', 'However', 'Although', 'If',
+            'Because', 'Since', 'While', 'As', 'So', 'Just', 'Well', 'Anyway'
+        }
+        words = re.findall(r'\b[A-Z][a-z]{2,}\b', text)
+        named = [w for w in words if w not in COMMON_STARTERS]
+        combined = list(dict.fromkeys(named + quoted + codes))
+        return combined[:5]
+
+    @staticmethod
+    def create_grounded_story_plan(
+        evidence_packets: List[Dict[str, Any]],
+        target_duration_mins: int = 5,
+        genre: str = "movie_recap",
+        target_lang: str = "en",
+        voice_speed: str = "fast"
+    ) -> List[Dict[str, Any]]:
+        """
+        Creates a structured, chronological story plan from evidence packets (Phase 3B Stage 1).
+        Enforces proportional word-budget distribution across the 5 narrative acts without inventing facts.
+        """
+        if not evidence_packets:
+            return []
+
+        target_words = ScriptEngine.calculate_target_words(target_duration_mins, voice_speed, target_lang)
+
+        act_weight_map = {
+            "Act 1": 0.20,
+            "Act 2A": 0.25,
+            "Act 2B": 0.25,
+            "Act 3": 0.20,
+            "Epilogue": 0.10
+        }
+
+        act_packets: Dict[str, List[Dict[str, Any]]] = {
+            "Act 1": [],
+            "Act 2A": [],
+            "Act 2B": [],
+            "Act 3": [],
+            "Epilogue": []
+        }
+        for p in evidence_packets:
+            a = p.get("act", "Act 1")
+            if a not in act_packets:
+                act_packets[a] = []
+            act_packets[a].append(p)
+
+        plan_items: List[Dict[str, Any]] = []
+        step_counter = 1
+
+        for act_name, p_list in act_packets.items():
+            if not p_list:
+                continue
+            act_budget = int(round(target_words * act_weight_map.get(act_name, 0.20)))
+            per_item_budget = max(20, act_budget // len(p_list))
+
+            for idx_in_act, packet in enumerate(p_list):
+                if act_name == "Act 1":
+                    purpose = "opening_hook" if idx_in_act == 0 else "inciting_setup"
+                elif act_name == "Act 2A":
+                    purpose = "progressive_complication"
+                elif act_name == "Act 2B":
+                    purpose = "midpoint_escalation"
+                elif act_name == "Act 3":
+                    purpose = "climax_confrontation"
+                else:
+                    purpose = "final_resolution"
+
+                entities = ScriptEngine._extract_grounded_entities(packet.get("source_text", ""))
+                core_event = packet.get("source_text", "").replace("\n", " ").strip()
+                if len(core_event) > 100:
+                    core_event = core_event[:97] + "..."
+
+                item = StoryPlanItem(
+                    step=step_counter,
+                    source_timestamp=float(packet.get("movie_start", 0.0)),
+                    act=act_name,
+                    evidence_ref=packet.get("packet_id", f"EP-{step_counter:03d}"),
+                    core_event=core_event,
+                    entities=entities,
+                    narration_purpose=purpose,
+                    budget_words=per_item_budget,
+                    is_inferred=False
+                )
+                plan_items.append(item.to_dict())
+                step_counter += 1
+
+        return plan_items
+
+    @staticmethod
+    def validate_story_plan(
+        plan: List[Dict[str, Any]],
+        evidence_packets: List[Dict[str, Any]]
+    ) -> Tuple[bool, str, Dict[str, Any]]:
+        """
+        Validates story plan integrity against evidence packets (Phase 3B Step 10).
+        Enforces step sequencing, chronological non-decreasing timestamps, reference existence,
+        and ensures no unresolved evidence is passed as verified fact.
+        """
+        if not plan:
+            return False, "Plan is empty.", {"total_plan_items": 0, "error": "empty_plan"}
+
+        packet_map = {p["packet_id"]: p for p in evidence_packets} if evidence_packets else {}
+        seen_refs = set()
+        prev_ts = -1.0
+        prev_step = 0
+
+        for idx, item in enumerate(plan):
+            step = item.get("step")
+            if step is None or step <= prev_step:
+                return False, f"Plan sequencing error at index {idx}: step {step} <= previous {prev_step}", {"error": "sequence_error"}
+            prev_step = step
+
+            ts = item.get("source_timestamp")
+            if ts is None or float(ts) < prev_ts:
+                return False, f"Plan chronology violation at step {step}: timestamp {ts} < previous {prev_ts}", {"error": "chronology_error"}
+            prev_ts = float(ts)
+
+            ref = item.get("evidence_ref")
+            if not ref or ref not in packet_map:
+                return False, f"Plan evidence reference error at step {step}: packet '{ref}' not found in evidence packets", {"error": "invalid_evidence_ref"}
+
+            if ref in seen_refs:
+                return False, f"Plan duplicate reference error at step {step}: packet '{ref}' reused", {"error": "duplicate_evidence_ref"}
+            seen_refs.add(ref)
+
+            pkt = packet_map[ref]
+            if not pkt.get("is_resolved", True):
+                return False, f"Plan references unresolved evidence at step {step}: packet '{ref}' has no source match", {"error": "unresolved_evidence"}
+
+        metrics = {
+            "total_plan_items": len(plan),
+            "total_evidence_packets": len(evidence_packets),
+            "covered_packets_count": len(seen_refs),
+            "coverage_ratio": round(len(seen_refs) / max(1, len(evidence_packets)), 4),
+            "is_chronological": True,
+            "is_sequenced": True,
+            "valid_references": True
+        }
+        return True, "Plan passed all grounding integrity checks.", metrics
+
+    @staticmethod
+    def format_evidence_packets_for_prompt(
+        packets: List[Dict[str, Any]],
+        max_packets: int = 50
+    ) -> str:
+        """Formats evidence packets for inclusion in LLM prompt blueprints (Phase 3B Stage 2)."""
+        lines = []
+        for p in packets[:max_packets]:
+            sec = float(p.get("movie_start", 0.0))
+            m = int(sec // 60)
+            s = int(sec % 60)
+            txt = p.get("source_text", "").replace("\n", " ").strip()
+            if len(txt) > 85:
+                txt = txt[:82] + "..."
+            line = f"[{p.get('packet_id', 'EP-???')}] [{m:02d}:{s:02d}] ({p.get('act', 'Act')}) Source: \"{txt}\""
+            cb = p.get("context_before", "").strip()
+            ca = p.get("context_after", "").strip()
+            if cb:
+                if len(cb) > 50:
+                    cb = cb[:47] + "..."
+                line += f" | Preceding: \"{cb}\""
+            if ca:
+                if len(ca) > 50:
+                    ca = ca[:47] + "..."
+                line += f" | Following: \"{ca}\""
+            lines.append(line)
+        return "\n".join(lines)
+
+    @staticmethod
+    def format_story_plan_for_prompt(
+        plan: List[Dict[str, Any]],
+        max_items: int = 50
+    ) -> str:
+        """Formats story plan items for inclusion in LLM prompt blueprints (Phase 3B Stage 2)."""
+        lines = []
+        for item in plan[:max_items]:
+            sec = float(item.get("source_timestamp", 0.0))
+            m = int(sec // 60)
+            s = int(sec % 60)
+            ents = ", ".join(item.get("entities", [])) if item.get("entities") else "None"
+            ev = item.get("core_event", "").replace("\n", " ").strip()
+            if len(ev) > 85:
+                ev = ev[:82] + "..."
+            line = f"- Step {item.get('step')} [{m:02d}:{s:02d}] ({item.get('act')}, Ref: {item.get('evidence_ref')}, Budget: ~{item.get('budget_words')} words, Purpose: {item.get('narration_purpose')}): {ev} (Entities: {ents})"
+            lines.append(line)
+        return "\n".join(lines)
+
+    @staticmethod
+    def build_plan_generation_prompt(
+        evidence_packets: List[Dict[str, Any]],
+        title: str = "",
+        genre: str = "movie_recap",
+        target_lang: str = "en",
+        duration_mins: int = 5
+    ) -> str:
+        """Builds Stage A prompt for generating a structured story plan from evidence packets."""
+        packets_str = ScriptEngine.format_evidence_packets_for_prompt(evidence_packets)
+        return f"""You are an elite narrative architect. Construct a grounded story plan for '{title}' ({genre}, {duration_mins}m).
+EVIDENCE PACKETS:
+{packets_str}
+
+STRICT GROUNDING RULES:
+1. ONLY use characters, events, and actions supported by the evidence packets above.
+2. DO NOT invent characters, relationships, causes, or outcomes not found in the evidence.
+3. Preserve the exact chronological order and timestamps of the evidence packets.
+4. Output one plan step per evidence packet referencing its packet ID (e.g. EP-001)."""
+
+    @staticmethod
+    def parse_story_plan(
+        plan_text: str,
+        evidence_packets: Optional[List[Dict[str, Any]]] = None
+    ) -> List[Dict[str, Any]]:
+        """Parses structured story plan output (JSON or formatted markdown) into plan item dicts."""
+        if not plan_text:
+            return []
+
+        try:
+            cleaned = plan_text.strip()
+            if cleaned.startswith("```"):
+                cleaned = re.sub(r'^```(?:json)?\s*', '', cleaned)
+                cleaned = re.sub(r'\s*```$', '', cleaned)
+            parsed = json.loads(cleaned)
+            if isinstance(parsed, list):
+                return parsed
+        except Exception:
+            pass
+
+        items = []
+        packet_map = {p["packet_id"]: p for p in evidence_packets} if evidence_packets else {}
+        line_regex = re.compile(
+            r'-\s*(?:Step\s*)?(\d+)\s*\[?((?:\d{1,2}:)?\d{1,3}:\d{2})?\]?\s*(?:\(([^,\)]+)(?:,\s*Ref:\s*([^,\)]+))?(?:,\s*Budget:\s*~?(\d+))?(?:,\s*Purpose:\s*([^,\)]+))?\))?:\s*(.*)',
+            re.IGNORECASE
+        )
+
+        for line in plan_text.splitlines():
+            l = line.strip()
+            if not l.startswith("-"):
+                continue
+            m = line_regex.match(l)
+            if m:
+                step_num = int(m.group(1))
+                ts_str = m.group(2) or "00:00"
+                act_str = (m.group(3) or "").strip()
+                ref_str = (m.group(4) or "").strip()
+                budget_str = m.group(5) or "50"
+                purpose_str = (m.group(6) or "progression").strip()
+                event_str = (m.group(7) or "").strip()
+
+                parts = ts_str.split(':')
+                sec = 0.0
+                if len(parts) == 2:
+                    sec = int(parts[0]) * 60.0 + float(parts[1])
+                elif len(parts) == 3:
+                    sec = int(parts[0]) * 3600.0 + int(parts[1]) * 60.0 + float(parts[2])
+
+                if not ref_str and evidence_packets and step_num <= len(evidence_packets):
+                    ref_str = evidence_packets[step_num - 1].get("packet_id", f"EP-{step_num:03d}")
+
+                if ref_str in packet_map:
+                    pkt = packet_map[ref_str]
+                    sec = float(pkt.get("movie_start", sec))
+                    if not act_str:
+                        act_str = pkt.get("act", "Act 1")
+
+                items.append({
+                    "step": step_num,
+                    "source_timestamp": sec,
+                    "act": act_str or "Act 1",
+                    "evidence_ref": ref_str or f"EP-{step_num:03d}",
+                    "core_event": event_str,
+                    "entities": ScriptEngine._extract_grounded_entities(event_str),
+                    "narration_purpose": purpose_str or "progression",
+                    "budget_words": int(budget_str),
+                    "is_inferred": False
+                })
+
+        return items
+
+    @staticmethod
+    def explain_script_traceability(
+        script_text: str,
+        story_plan: List[Dict[str, Any]],
+        evidence_packets: List[Dict[str, Any]]
+    ) -> Dict[str, Any]:
+        """
+        Introspection helper tracing each generated scene block back through the Story Plan to Evidence Packets (Phase 3B Step 9).
+        Verifies internal grounding chain: SceneBlock -> StoryPlanItem -> EvidencePacket -> SourceCue.
+        """
+        if not script_text or not story_plan or not evidence_packets:
+            return {
+                "total_scenes": 0,
+                "total_plan_items": len(story_plan) if story_plan else 0,
+                "total_evidence_packets": len(evidence_packets) if evidence_packets else 0,
+                "grounding_ratio": 0.0,
+                "traceability_chain": []
+            }
+
+        blocks = ScriptEngine.parse_storyboard_blocks(script_text)
+        packet_map = {p["packet_id"]: p for p in evidence_packets}
+
+        chain = []
+        grounded_count = 0
+
+        for s_idx, block in enumerate(blocks):
+            b_start = float(block.movie_start)
+            b_text = block.narration_text.lower()
+
+            matched_plan = min(story_plan, key=lambda it: abs(float(it.get("source_timestamp", 0.0)) - b_start))
+            ref = matched_plan.get("evidence_ref")
+            matched_packet = packet_map.get(ref, {})
+
+            p_start = float(matched_packet.get("movie_start", matched_plan.get("source_timestamp", 0.0)))
+            time_dist = abs(b_start - p_start)
+
+            p_words = set(re.findall(r'\w{3,}', matched_packet.get("source_text", "").lower(), flags=re.UNICODE))
+            b_words = set(re.findall(r'\w{3,}', b_text, flags=re.UNICODE))
+            overlap = len(p_words & b_words)
+
+            is_grounded = (time_dist <= 120.0 or overlap > 0)
+            if is_grounded:
+                grounded_count += 1
+
+            chain.append({
+                "scene_index": s_idx + 1,
+                "scene_start": b_start,
+                "narration_snippet": block.narration_text[:60],
+                "matched_plan_step": matched_plan.get("step"),
+                "matched_evidence_ref": ref,
+                "source_timestamp": p_start,
+                "source_text_snippet": matched_packet.get("source_text", "")[:60],
+                "time_distance_sec": round(time_dist, 1),
+                "token_overlap_count": overlap,
+                "is_grounded": is_grounded
+            })
+
+        ratio = grounded_count / max(1, len(blocks))
+        return {
+            "total_scenes": len(blocks),
+            "total_plan_items": len(story_plan),
+            "total_evidence_packets": len(evidence_packets),
+            "grounded_scenes_count": grounded_count,
+            "grounding_ratio": round(ratio, 4),
+            "traceability_chain": chain
         }
 
     @staticmethod
@@ -1825,7 +2363,7 @@ class ScriptEngine:
                 beats_lines.append(line)
             beats_section = "\n".join(beats_lines) + "\n"
 
-        # Compress transcript into full-movie roadmap if available (prevents truncation)
+        # Compress transcript into full-movie roadmap & build Phase 3B evidence packets + story plan
         if (subs_text and subs_text.strip()) or (dialogue_timeline and len(dialogue_timeline) > 0):
             roadmap = ScriptEngine.compress_transcript_to_roadmap(
                 subs_text=subs_text or "",
@@ -1834,7 +2372,33 @@ class ScriptEngine:
                 dialogue_timeline=dialogue_timeline
             )
             fallback_sample = ScriptEngine.extract_balanced_transcript_sample(subs_text or "", max_chars=4000)
-            transcript_section = f"Full-Movie Dialogue & Event Roadmap (Beginning to Climax):\n{roadmap}" if roadmap else f"Source Transcript Highlights:\n{fallback_sample}"
+
+            # Phase 3B: Grounded Evidence Packets + Story Plan
+            evidence_packets = ScriptEngine.build_evidence_packets(
+                subs_text=subs_text or "",
+                total_movie_dur=float(source_video_duration_sec or (duration_mins * 60.0 * 6.0)),
+                target_output_dur_mins=duration_mins,
+                dialogue_timeline=dialogue_timeline
+            )
+            story_plan = ScriptEngine.create_grounded_story_plan(
+                evidence_packets=evidence_packets,
+                target_duration_mins=duration_mins,
+                genre=genre,
+                target_lang=target_lang,
+                voice_speed=voice_speed
+            )
+
+            grounding_sections = []
+            if roadmap:
+                grounding_sections.append(f"Full-Movie Dialogue & Event Roadmap (Beginning to Climax):\n{roadmap}")
+            if evidence_packets:
+                packets_formatted = ScriptEngine.format_evidence_packets_for_prompt(evidence_packets[:45])
+                grounding_sections.append(f"=== MANDATORY SOURCE EVIDENCE PACKETS (FACTUAL AUTHORITY) ===\n{packets_formatted}")
+            if story_plan:
+                plan_formatted = ScriptEngine.format_story_plan_for_prompt(story_plan[:45])
+                grounding_sections.append(f"=== MANDATORY CHRONOLOGICAL STORY PLAN (STRUCTURAL AUTHORITY) ===\n{plan_formatted}")
+
+            transcript_section = "\n\n".join(grounding_sections) if grounding_sections else f"Source Transcript Highlights:\n{fallback_sample}"
         else:
             transcript_section = "Source Transcript: None provided. Structure narrative from beginning to climax based on plot guide."
 
@@ -1941,6 +2505,27 @@ FORMATTING & AI DIRECTOR REQUIREMENTS:
         api_key = gemini_api_key or os.environ.get("GEMINI_API_KEY", "")
         target_words = ScriptEngine.calculate_target_words(duration_mins, voice_speed, target_lang)
 
+        # Phase 3B: Grounded Evidence Packets + Story Plan Construction & Validation
+        evidence_packets = []
+        story_plan = []
+        is_plan_valid = True
+        plan_validation_report = "No source provided"
+        if (subs_text and subs_text.strip()) or (dialogue_timeline and len(dialogue_timeline) > 0):
+            evidence_packets = ScriptEngine.build_evidence_packets(
+                subs_text=subs_text or "",
+                total_movie_dur=float(source_video_duration_sec or (duration_mins * 60.0 * 6.0)),
+                target_output_dur_mins=duration_mins,
+                dialogue_timeline=dialogue_timeline
+            )
+            story_plan = ScriptEngine.create_grounded_story_plan(
+                evidence_packets=evidence_packets,
+                target_duration_mins=duration_mins,
+                genre=genre,
+                target_lang=target_lang,
+                voice_speed=voice_speed
+            )
+            is_plan_valid, plan_validation_report, _ = ScriptEngine.validate_story_plan(story_plan, evidence_packets)
+
         # Pass 1: If story_beats not provided but subs_text available, extract story beats via 9Router
         if story_beats is None and subs_text:
             try:
@@ -2011,7 +2596,11 @@ Separate each part strictly with '===PART===' on its own line."""
                         "story_beats": story_beats or [],
                         "format_mode": format_mode,
                         "num_parts": num_parts,
-                        "audio_mode": audio_mode
+                        "audio_mode": audio_mode,
+                        "evidence_packets": [p.to_dict() if hasattr(p, "to_dict") else p for p in evidence_packets],
+                        "story_plan": [s.to_dict() if hasattr(s, "to_dict") else s for s in story_plan],
+                        "is_plan_valid": is_plan_valid,
+                        "plan_validation_report": plan_validation_report
                     }
         except Exception as e:
             print(f"[AIRouter Dispatch Notice] {e}")
@@ -2082,7 +2671,11 @@ TASK: Elaborate, expand and enrich the story across Act 1, Act 2, and Act 3 with
                         "hook_score": hook_metrics,
                         "story_beats": story_beats or [],
                         "is_valid": is_valid,
-                        "integrity_report": val_report
+                        "integrity_report": val_report,
+                        "evidence_packets": [p.to_dict() if hasattr(p, "to_dict") else p for p in evidence_packets],
+                        "story_plan": [s.to_dict() if hasattr(s, "to_dict") else s for s in story_plan],
+                        "is_plan_valid": is_plan_valid,
+                        "plan_validation_report": plan_validation_report
                     }
         except Exception as e:
             print(f"[OpenAI ChatGPT Integration Notice] Fallback triggered: {e}")
@@ -2143,7 +2736,11 @@ TASK: Elaborate, expand and enrich the story across Act 1, Act 2, and Act 3 with
                         "hook_score": hook_metrics,
                         "story_beats": story_beats or [],
                         "is_valid": is_valid,
-                        "integrity_report": val_report
+                        "integrity_report": val_report,
+                        "evidence_packets": [p.to_dict() if hasattr(p, "to_dict") else p for p in evidence_packets],
+                        "story_plan": [s.to_dict() if hasattr(s, "to_dict") else s for s in story_plan],
+                        "is_plan_valid": is_plan_valid,
+                        "plan_validation_report": plan_validation_report
                     }
         except Exception as e:
             print(f"[9Router Integration Warning] {e}")
@@ -2204,7 +2801,11 @@ TASK: Elaborate, expand and enrich the story across Act 1, Act 2, and Act 3 with
                                 "hook_score": hook_metrics,
                                 "story_beats": story_beats or [],
                                 "is_valid": is_valid,
-                                "integrity_report": val_report
+                                "integrity_report": val_report,
+                                "evidence_packets": [p.to_dict() if hasattr(p, "to_dict") else p for p in evidence_packets],
+                                "story_plan": [s.to_dict() if hasattr(s, "to_dict") else s for s in story_plan],
+                                "is_plan_valid": is_plan_valid,
+                                "plan_validation_report": plan_validation_report
                             }
                 except Exception:
                     continue
@@ -2220,7 +2821,11 @@ TASK: Elaborate, expand and enrich the story across Act 1, Act 2, and Act 3 with
             "genre": genre,
             "target_words": target_words,
             "hook_score": hook_metrics,
-            "story_beats": story_beats or []
+            "story_beats": story_beats or [],
+            "evidence_packets": [p.to_dict() if hasattr(p, "to_dict") else p for p in evidence_packets],
+            "story_plan": [s.to_dict() if hasattr(s, "to_dict") else s for s in story_plan],
+            "is_plan_valid": is_plan_valid,
+            "plan_validation_report": plan_validation_report
         }
 
     @staticmethod
