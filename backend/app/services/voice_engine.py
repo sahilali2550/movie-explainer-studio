@@ -353,10 +353,16 @@ class VoiceEngine:
         """
         Extracts exact duration in seconds using ffprobe.
         Falls back to companion cues.json if probe fails, or raises RuntimeError.
+        Validates that duration is a finite positive number.
         """
         import subprocess
         import json
+        import math
         from app.core.config import get_ffprobe_binary
+
+        if not audio_path or not isinstance(audio_path, str):
+            raise RuntimeError(f"Unable to determine audio duration: invalid path '{audio_path}'")
+
         ffprobe_bin = get_ffprobe_binary()
         try:
             cmd = [
@@ -366,7 +372,7 @@ class VoiceEngine:
             res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
             if res.returncode == 0 and res.stdout.strip():
                 dur = float(res.stdout.strip())
-                if dur > 0:
+                if math.isfinite(dur) and dur > 0:
                     return dur
         except Exception:
             pass
@@ -379,12 +385,27 @@ class VoiceEngine:
                     cues = json.load(jf)
                 if cues and isinstance(cues, list):
                     last_end = float(cues[-1].get("end", 0.0))
-                    if last_end > 0:
+                    if math.isfinite(last_end) and last_end > 0:
                         return last_end
             except Exception:
                 pass
 
         raise RuntimeError(f"Unable to determine audio duration for: {audio_path}")
+
+    @staticmethod
+    def probe_block_audio_durations(audio_paths: List[str]) -> List[float]:
+        """
+        Phase 4A: Probes exact synthesized audio durations for a sequence of audio files.
+        Raises RuntimeError if any audio file is missing, unreadable, or invalid.
+        """
+        if not audio_paths:
+            return []
+        durations: List[float] = []
+        for p in audio_paths:
+            dur = VoiceEngine.get_audio_duration(p)
+            durations.append(dur)
+        return durations
+
 
     @classmethod
     async def generate_cloned_preview(

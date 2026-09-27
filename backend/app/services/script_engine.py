@@ -12,6 +12,16 @@ from app.core.config import SUPPORTED_LANGUAGES, STORY_PERSONAS
 
 @dataclass
 class SceneBlock:
+    """
+    Phase 4A Authoritative SceneBlock Representation.
+    Preserves strict separation between source movie coordinates and output narration coordinates.
+
+    Coordinate Hierarchy:
+    - movie_start / movie_end: SOURCE MOVIE timeline coordinates (factual source anchors).
+    - narration_start / narration_end: OUTPUT EXPLAINER timeline coordinates (derived from actual TTS).
+    - estimated_duration: Pre-TTS planning estimate based on word budget / WPM (never final authority).
+    - actual_duration / speech_dur: Authoritative measured duration of synthesized TTS audio.
+    """
     movie_start: float          # seconds into SOURCE movie (e.g. 185.0)
     movie_end: float            # seconds into SOURCE movie (e.g. 290.0)
     narration_text: str         # clean spoken narration for this scene
@@ -20,6 +30,32 @@ class SceneBlock:
     narration_start: float = 0.0 # start timestamp in explainer voiceover
     narration_end: float = 0.0   # end timestamp in explainer voiceover
     dialogue_ref: str = ""       # exact dialogue quote or reference from source movie
+    estimated_duration: float = 0.0  # pre-TTS estimated narration duration (seconds)
+    actual_duration: float = 0.0     # authoritative measured TTS duration (seconds)
+    audio_file: Optional[str] = None # path or identifier of synthesized audio file
+    block_id: Optional[str] = None   # optional scene/block identifier (e.g. "SCENE_1")
+    is_authoritative: bool = False   # True once locked to actual synthesized TTS audio
+    evidence_ref: Optional[str] = None # Phase 3B evidence packet reference (e.g. "EP-001")
+    story_step: Optional[int] = None   # Phase 3B story plan step number
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "movie_start": self.movie_start,
+            "movie_end": self.movie_end,
+            "narration_text": self.narration_text,
+            "word_count": self.word_count,
+            "speech_dur": self.speech_dur,
+            "narration_start": self.narration_start,
+            "narration_end": self.narration_end,
+            "dialogue_ref": self.dialogue_ref,
+            "estimated_duration": self.estimated_duration,
+            "actual_duration": self.actual_duration,
+            "audio_file": self.audio_file,
+            "block_id": self.block_id,
+            "is_authoritative": self.is_authoritative,
+            "evidence_ref": self.evidence_ref,
+            "story_step": self.story_step,
+        }
 
 
 @dataclass
@@ -1947,17 +1983,43 @@ STRICT GROUNDING RULES:
         Level 1 (Authoritative): Matches against Edge-TTS sentence boundary cues (_cues.json).
         Level 2 (Proportional Fallback): Allocates duration based on word-count weighting.
         Enforces mathematical invariant: sum(block.speech_dur) == total_speech_dur.
+        Phase 4A: Records estimated_duration vs actual_duration and marks blocks authoritative.
         """
         if not blocks:
             return []
 
-        total_speech_dur = max(1.0, float(total_speech_dur))
+        import math
+        try:
+            total_val = float(total_speech_dur)
+            if not math.isfinite(total_val) or total_val <= 0.0:
+                raise ValueError(f"Invalid total_speech_dur: {total_speech_dur}. Must be a finite positive number.")
+        except (TypeError, ValueError) as ve:
+            raise ValueError(f"Invalid total_speech_dur: {total_speech_dur}. Must be a finite positive number.") from ve
+
+        total_speech_dur = round(total_val, 3)
 
         if len(blocks) == 1:
-            blocks[0].speech_dur = round(total_speech_dur, 3)
+            if blocks[0].estimated_duration <= 0.0:
+                blocks[0].estimated_duration = round(blocks[0].speech_dur, 3) if blocks[0].speech_dur > 0.0 else total_speech_dur
+            blocks[0].actual_duration = total_speech_dur
+            blocks[0].speech_dur = total_speech_dur
             blocks[0].narration_start = 0.0
-            blocks[0].narration_end = round(total_speech_dur, 3)
+            blocks[0].narration_end = total_speech_dur
+            blocks[0].is_authoritative = True
+            if not blocks[0].block_id:
+                blocks[0].block_id = "SCENE_1"
             return blocks
+
+        # Preserve / compute pre-TTS estimates if not already populated
+        total_words = sum(max(1, b.word_count) for b in blocks)
+        for idx, b in enumerate(blocks):
+            if not b.block_id:
+                b.block_id = f"SCENE_{idx + 1}"
+            if b.estimated_duration <= 0.0:
+                if b.speech_dur > 0.0:
+                    b.estimated_duration = round(b.speech_dur, 3)
+                else:
+                    b.estimated_duration = round((max(1, b.word_count) / max(1, total_words)) * total_speech_dur, 3)
 
         used_cues = False
         if cues and len(cues) > 0:
@@ -2013,7 +2075,6 @@ STRICT GROUNDING RULES:
                 used_cues = False
 
         if not used_cues:
-            total_words = sum(max(1, b.word_count) for b in blocks)
             curr_t = 0.0
             for i, b in enumerate(blocks):
                 w = max(1, b.word_count)
@@ -2027,7 +2088,203 @@ STRICT GROUNDING RULES:
             blocks[-1].narration_end = round(total_speech_dur, 3)
             blocks[-1].speech_dur = round(blocks[-1].narration_end - blocks[-1].narration_start, 3)
 
+        for b in blocks:
+            b.actual_duration = round(b.speech_dur, 3)
+            b.is_authoritative = True
+
         return blocks
+
+    @staticmethod
+    def estimate_block_durations(
+        blocks: List[SceneBlock],
+        target_output_duration_sec: Optional[float] = None,
+        language: str = "en",
+        voice_speed: str = "fast"
+    ) -> List[SceneBlock]:
+        """
+        Phase 4A: Computes pre-TTS duration estimates based on word count.
+        Populates b.estimated_duration and sets pre-TTS placeholder in b.speech_dur.
+        Does NOT set b.is_authoritative (remains False until actual TTS audio is synthesized).
+        """
+        if not blocks:
+            return []
+        total_words = sum(max(1, b.word_count) for b in blocks)
+        if target_output_duration_sec is not None and target_output_duration_sec > 0:
+            target_sec = float(target_output_duration_sec)
+            for idx, b in enumerate(blocks):
+                w = max(1, b.word_count)
+                b.estimated_duration = round((w / max(1, total_words)) * target_sec, 3)
+                b.speech_dur = b.estimated_duration
+                if not b.block_id:
+                    b.block_id = f"SCENE_{idx + 1}"
+                b.is_authoritative = False
+        else:
+            base_wpm = ScriptEngine.LANGUAGE_WPM.get(language, 150)
+            mult = ScriptEngine.SPEED_MULTIPLIER.get(voice_speed, 1.15)
+            eff_wpm = max(50.0, base_wpm * mult)
+            for idx, b in enumerate(blocks):
+                w = max(1, b.word_count)
+                b.estimated_duration = round((w / eff_wpm) * 60.0, 3)
+                b.speech_dur = b.estimated_duration
+                if not b.block_id:
+                    b.block_id = f"SCENE_{idx + 1}"
+                b.is_authoritative = False
+        return blocks
+
+    @staticmethod
+    def build_authoritative_narration_timeline(
+        blocks: List[SceneBlock],
+        actual_durations: Any,
+        cues: Optional[List[Dict[str, Any]]] = None,
+        estimated_durations: Optional[List[float]] = None
+    ) -> List[SceneBlock]:
+        """
+        Phase 4A: Authoritative Narration Timeline Authority.
+        Establishes synthesized TTS audio duration as the sole timing authority for narration blocks,
+        maintaining strict mathematical invariants and keeping source movie coordinates strictly separate
+        from output narration coordinates.
+
+        Coordinate Hierarchy:
+        1. Source movie timestamps (b.movie_start, b.movie_end) = FACTUAL SOURCE ANCHORS (strictly untouched).
+        2. Planned narration duration (b.estimated_duration) = PRE-TTS ESTIMATE ONLY.
+        3. Actual synthesized audio duration (b.actual_duration) = AUTHORITATIVE DURATION.
+        4. Final narration timeline (b.narration_start, b.narration_end) = SEQUENTIAL ACCUMULATION.
+
+        Mathematical Invariants:
+        - narration_start_0 = 0.0
+        - narration_start_i = narration_end_{i-1}
+        - sum(b.actual_duration) == (blocks[-1].narration_end - blocks[0].narration_start)
+        - movie_start and movie_end are never modified or conflated with narration timings.
+        """
+        import math
+        from app.services.voice_engine import VoiceEngine
+
+        if not blocks:
+            return []
+
+        if actual_durations is None:
+            raise ValueError("actual_durations cannot be None")
+
+        # Case A: Single total duration provided (float or int)
+        if isinstance(actual_durations, (int, float)):
+            val = float(actual_durations)
+            if not math.isfinite(val) or val <= 0.0:
+                raise ValueError(f"Invalid actual audio duration: {actual_durations}. Must be a finite positive number.")
+
+            # Record explicit estimated durations if provided
+            if estimated_durations:
+                for idx, b in enumerate(blocks):
+                    if idx < len(estimated_durations):
+                        b.estimated_duration = round(float(estimated_durations[idx]), 3)
+
+            return ScriptEngine.assign_narration_timing(blocks, val, cues=cues)
+
+        # Case B: List of durations or audio file paths
+        if isinstance(actual_durations, list):
+            if len(actual_durations) != len(blocks):
+                raise ValueError(
+                    f"Block count ({len(blocks)}) does not match actual_durations count ({len(actual_durations)})."
+                )
+
+            parsed_durations: List[float] = []
+            for item in actual_durations:
+                if isinstance(item, str):
+                    dur = VoiceEngine.get_audio_duration(item)
+                    if not math.isfinite(dur) or dur <= 0.0:
+                        raise ValueError(f"Audio file '{item}' yielded invalid duration: {dur}")
+                    parsed_durations.append(round(dur, 3))
+                elif isinstance(item, (int, float)):
+                    val = float(item)
+                    if not math.isfinite(val) or val <= 0.0:
+                        raise ValueError(f"Invalid duration: {item}. Must be a finite positive number.")
+                    parsed_durations.append(round(val, 3))
+                else:
+                    raise ValueError(f"Unsupported duration type in actual_durations: {type(item)}")
+
+            curr_t = 0.0
+            for idx, (b, dur) in enumerate(zip(blocks, parsed_durations)):
+                # Preserve or record pre-TTS estimate
+                if estimated_durations and idx < len(estimated_durations):
+                    b.estimated_duration = round(float(estimated_durations[idx]), 3)
+                elif b.estimated_duration <= 0.0:
+                    if b.speech_dur > 0.0:
+                        b.estimated_duration = round(b.speech_dur, 3)
+
+                b.actual_duration = dur
+                b.speech_dur = dur
+                b.narration_start = round(curr_t, 3)
+                curr_t = round(curr_t + dur, 3)
+                b.narration_end = curr_t
+                b.is_authoritative = True
+                if not b.block_id:
+                    b.block_id = f"SCENE_{idx + 1}"
+
+            # Strict verification of sum invariant
+            total_actual = round(sum(b.actual_duration for b in blocks), 3)
+            timeline_span = round(blocks[-1].narration_end - blocks[0].narration_start, 3)
+            assert abs(total_actual - timeline_span) < 1e-3, (
+                f"Timeline invariant failed: sum(actual)={total_actual} != span={timeline_span}"
+            )
+
+            return blocks
+
+        raise ValueError(f"Invalid type for actual_durations: {type(actual_durations)}")
+
+    @staticmethod
+    def detect_duration_mismatch(blocks: List[SceneBlock]) -> Dict[str, Any]:
+        """
+        Phase 4A: Observability mechanism comparing estimated vs actual durations.
+        Calculates absolute and relative deltas globally and per block.
+        """
+        if not blocks:
+            return {
+                "total_estimated_sec": 0.0,
+                "total_actual_sec": 0.0,
+                "absolute_delta": 0.0,
+                "relative_delta": 0.0,
+                "max_block_delta": 0.0,
+                "block_mismatches": [],
+                "is_authoritative": False
+            }
+
+        total_est = round(sum(b.estimated_duration for b in blocks), 3)
+        total_act = round(sum(b.actual_duration if b.is_authoritative else b.speech_dur for b in blocks), 3)
+        abs_delta = round(total_act - total_est, 3)
+        rel_delta = round(abs_delta / total_est, 4) if total_est > 0 else 0.0
+
+        block_mismatches = []
+        max_delta = 0.0
+        all_auth = True
+
+        for idx, b in enumerate(blocks):
+            act = b.actual_duration if b.is_authoritative else b.speech_dur
+            est = b.estimated_duration
+            b_abs = round(act - est, 3)
+            b_rel = round(b_abs / est, 4) if est > 0 else 0.0
+            if abs(b_abs) > max_delta:
+                max_delta = abs(b_abs)
+            if not b.is_authoritative:
+                all_auth = False
+            block_mismatches.append({
+                "block_index": idx,
+                "block_id": b.block_id or f"SCENE_{idx + 1}",
+                "estimated_duration": est,
+                "actual_duration": act,
+                "absolute_delta": b_abs,
+                "relative_delta": b_rel,
+                "is_authoritative": b.is_authoritative
+            })
+
+        return {
+            "total_estimated_sec": total_est,
+            "total_actual_sec": total_act,
+            "absolute_delta": abs_delta,
+            "relative_delta": rel_delta,
+            "max_block_delta": round(max_delta, 3),
+            "block_mismatches": block_mismatches,
+            "is_authoritative": all_auth
+        }
+
 
     @staticmethod
     def extract_sfx_cues(raw_script: str, total_duration: float = 60.0) -> List[Dict[str, Any]]:
