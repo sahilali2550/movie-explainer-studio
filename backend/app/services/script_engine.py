@@ -481,102 +481,397 @@ class ScriptEngine:
         return final_text, ranges, scene_subs
 
     @staticmethod
-    def compress_transcript_to_roadmap(subs_text: str, total_movie_dur: float = 3600.0, max_points: int = 42) -> str:
+    def calculate_roadmap_capacity(
+        target_output_dur_mins: Optional[float] = None,
+        source_duration_sec: float = 3600.0,
+        total_cues: int = 100
+    ) -> int:
         """
-        Compresses full raw transcripts (SRT, VTT, or timestamped text) into an evenly spaced
-        chronological event & dialogue roadmap spanning from opening (2%) to climax (92%).
-        Prevents LLM truncation while ensuring full story arc visibility without token blowup.
+        Dynamically calculates target roadmap event capacity (Phase 3A).
+        Balances output duration, source duration, and available cue density
+        without hardcoded static constants.
         """
-        if not subs_text or not subs_text.strip():
+        if total_cues <= 0:
+            return 0
+
+        # Determine effective output duration in minutes
+        if target_output_dur_mins is not None and target_output_dur_mins > 0:
+            out_mins = float(target_output_dur_mins)
+        else:
+            # Derive reasonable compression ratio (approx 6:1 source-to-output, clamped)
+            out_mins = max(3.0, min(float(source_duration_sec) / 360.0, 30.0))
+
+        # Dynamic continuous scaling formula:
+        # Monotonically increasing with output duration (Invariant 5)
+        # Bounded between 1 and total_cues (Invariant 6)
+        base_capacity = 14.0 + (out_mins ** 0.82) * 4.2
+        target_cap = int(round(base_capacity))
+
+        return max(1, min(total_cues, target_cap))
+
+    @staticmethod
+    def evaluate_cue_informativeness(cue_text: str) -> float:
+        """
+        Evaluates narrative informativeness and semantic action density of a cue (Phase 3A Step 7).
+        Prevents raw character length from favoring rambling filler over concise plot revelations.
+        """
+        if not cue_text:
+            return 0.0
+
+        clean = re.sub(r'<[^>]+>', '', str(cue_text)).strip()
+        if not clean:
+            return 0.0
+
+        # Audio / noise tag penalty
+        if clean.startswith(('[', '(')) and any(tag in clean.upper() for tag in ['SFX', 'MUSIC', 'APPLAUSE', 'LAUGHTER', 'INARTICULATE']):
+            return -10.0
+
+        STOP_WORDS = {
+            'a', 'an', 'the', 'is', 'in', 'it', 'of', 'to', 'and', 'or',
+            'on', 'at', 'by', 'as', 'be', 'we', 'he', 'she', 'his', 'her',
+            'was', 'are', 'this', 'that', 'with', 'for', 'from', 'not',
+            'but', 'so', 'if', 'its', 'into', 'up', 'out', 'now', 'then',
+            'were', 'have', 'has', 'had', 'would', 'could', 'will', 'do',
+            'i', 'you', 'my', 'your', 'me', 'him', 'them', 'they', 'what',
+            'who', 'how', 'why', 'when', 'where', 'there', 'here', 'just',
+            'about', 'like', 'well', 'um', 'uh', 'yeah', 'okay', 'oh', 'no', 'yes'
+        }
+
+        NARRATIVE_KEYWORDS = {
+            'kill', 'killer', 'murder', 'murderer', 'dead', 'death', 'die', 'died', 'poison', 'poisoned',
+            'victim', 'suspect', 'police', 'detective', 'gun', 'shoot', 'shot', 'weapon', 'blood',
+            'secret', 'truth', 'discover', 'discovered', 'reveal', 'revealed', 'hide', 'evidence', 'proof',
+            'lie', 'lied', 'escape', 'escaped', 'trap', 'trapped', 'danger', 'bomb', 'destroy', 'destroyed',
+            'save', 'saved', 'help', 'betray', 'betrayed', 'confess', 'confession', 'arrest', 'arrested',
+            'stole', 'steal', 'brother', 'sister', 'father', 'mother', 'daughter', 'son', 'husband', 'wife',
+            'money', 'end', 'final', 'goodbye', 'love', 'hate', 'promise', 'trust', 'run', 'found'
+        }
+
+        words = re.findall(r'\w{2,}', clean.lower(), flags=re.UNICODE)
+        if not words:
+            return 0.0
+
+        info_words = [w for w in words if w not in STOP_WORDS and not w.isdigit()]
+        unique_info = set(info_words)
+        kw_count = sum(1 for w in unique_info if w in NARRATIVE_KEYWORDS)
+        repetition = max(0, len(words) - len(set(words)))
+        kw_density = (kw_count / len(unique_info)) if unique_info else 0.0
+
+        sc = (len(unique_info) * 1.5) + (kw_count * 4.5) + (kw_density * 6.0) - (repetition * 1.5)
+        if len(clean) < 6:
+            sc -= 2.0
+
+        return round(sc, 2)
+
+    @staticmethod
+    def extract_balanced_transcript_sample(subs_text: str, max_chars: int = 4000) -> str:
+        """
+        Extracts a balanced beginning-middle-ending sample of raw unparsed transcript text
+        to prevent Act 2/3 and ending erasure when structured cues cannot be parsed (Phase 3A Step 8).
+        """
+        if not subs_text or len(subs_text) <= max_chars:
+            return subs_text or ""
+        part_budget = max(100, (max_chars - 100) // 3)
+        p1 = subs_text[:part_budget].rstrip()
+        mid_idx = len(subs_text) // 2
+        p2 = subs_text[mid_idx - part_budget // 2 : mid_idx + part_budget // 2].strip()
+        p3 = subs_text[-part_budget:].lstrip()
+        return f"{p1}\n\n[... Narrative Progression ...]\n\n{p2}\n\n[... Climax & Resolution ...]\n\n{p3}"
+
+    @staticmethod
+    def compress_transcript_to_roadmap(
+        subs_text: str,
+        total_movie_dur: float = 3600.0,
+        max_points: Optional[int] = None,
+        target_output_dur_mins: Optional[int] = None,
+        dialogue_timeline: Optional[List[Dict[str, Any]]] = None
+    ) -> str:
+        """
+        Compresses source transcripts into a chronological, act-aware narrative roadmap (Phase 3A).
+        Guarantees full story arc coverage across all 5 narrative acts (beginning, midpoint, climax, ending)
+        with duration-aware density and deterministic, informativeness-driven cue selection.
+        """
+        if not subs_text and not dialogue_timeline:
             return ""
 
         from app.services.video_engine import VideoEngine
 
         cues: List[Dict[str, Any]] = []
-        try:
-            # 1. Try parsing through VideoEngine's multi-format parser
-            res = VideoEngine.parse_raw_transcript_text(subs_text)
-            cues = res.get("dialogue_timeline", [])
-        except Exception:
-            cues = []
+        if dialogue_timeline and len(dialogue_timeline) > 0:
+            cues = [dict(c) for c in dialogue_timeline if c.get("text", "").strip()]
+        else:
+            try:
+                res = VideoEngine.parse_raw_transcript_text(subs_text)
+                cues = res.get("dialogue_timeline", [])
+            except Exception:
+                cues = []
 
-        # 2. Fallback regex line-by-line parsing if empty
-        if not cues:
-            ts_regex = re.compile(r'\[?(\d{1,2}:\d{2}(?::\d{2})?)\]?\s*(.*)')
-            for line in subs_text.splitlines():
-                l = line.strip()
-                if not l:
-                    continue
-                m = ts_regex.match(l)
-                if m:
-                    ts_str = m.group(1)
-                    txt = m.group(2).strip()
-                    parts = ts_str.split(':')
-                    sec = 0.0
-                    if len(parts) == 2:
-                        sec = int(parts[0]) * 60 + float(parts[1])
-                    elif len(parts) == 3:
-                        sec = int(parts[0]) * 3600 + int(parts[1]) * 60 + float(parts[2])
-                    if txt:
-                        cues.append({"start": sec, "end": sec + 5.0, "text": txt})
+            if not cues:
+                ts_regex = re.compile(r'\[?((?:\d{1,2}:)?\d{1,3}:\d{2})\]?\s*(.*)')
+                for line in subs_text.splitlines():
+                    l = line.strip()
+                    if not l:
+                        continue
+                    m = ts_regex.match(l)
+                    if m:
+                        ts_str = m.group(1)
+                        txt = m.group(2).strip()
+                        parts = ts_str.split(':')
+                        sec = 0.0
+                        if len(parts) == 2:
+                            sec = int(parts[0]) * 60.0 + float(parts[1])
+                        elif len(parts) == 3:
+                            sec = int(parts[0]) * 3600.0 + int(parts[1]) * 60.0 + float(parts[2])
+                        if txt:
+                            cues.append({"start": sec, "end": sec + 5.0, "text": txt})
 
         if not cues:
-            return subs_text[:3500]
+            return ScriptEngine.extract_balanced_transcript_sample(subs_text, max_chars=3500)
 
         cues.sort(key=lambda x: x["start"])
 
-        # Determine movie time bounds
-        max_cue_time = cues[-1]["start"]
-        effective_movie_dur = max(float(total_movie_dur), max_cue_time + 10.0)
+        # Determine target capacity (Phase 3A Step 4)
+        if max_points is not None and max_points > 0:
+            target_capacity = min(len(cues), int(max_points))
+        else:
+            target_capacity = ScriptEngine.calculate_roadmap_capacity(
+                target_output_dur_mins=target_output_dur_mins,
+                source_duration_sec=total_movie_dur,
+                total_cues=len(cues)
+            )
 
-        # Cover from 2% of movie to 92% of movie (avoiding studio logos and end credits)
-        start_bound = max(0.0, 0.02 * effective_movie_dur)
-        end_bound = min(effective_movie_dur, 0.92 * effective_movie_dur)
+        # Timeline bounds (Phase 3A Step 5: Preserve full movie including climax and resolution)
+        first_cue_s = float(cues[0]["start"])
+        last_cue_s = float(cues[-1]["start"])
+        effective_dur = max(float(total_movie_dur), last_cue_s + 10.0)
+        start_bound = max(0.0, min(first_cue_s, effective_dur * 0.02))
+        end_bound = min(effective_dur, max(last_cue_s + 5.0, effective_dur * 0.98))
         if end_bound <= start_bound:
-            start_bound = cues[0]["start"]
-            end_bound = max_cue_time
+            start_bound = first_cue_s
+            end_bound = last_cue_s + 5.0
+        story_span = max(1.0, end_bound - start_bound)
 
-        span = max(1.0, end_bound - start_bound)
-        num_buckets = min(max_points, len(cues))
-        step = span / max(1, num_buckets)
+        # 5 Acts definitions matching partition_timeline
+        acts_def = [
+            ("Act 1", start_bound, start_bound + 0.20 * story_span, 0.20),
+            ("Act 2A", start_bound + 0.20 * story_span, start_bound + 0.45 * story_span, 0.25),
+            ("Act 2B", start_bound + 0.45 * story_span, start_bound + 0.70 * story_span, 0.25),
+            ("Act 3", start_bound + 0.70 * story_span, start_bound + 0.90 * story_span, 0.20),
+            ("Epilogue", start_bound + 0.90 * story_span, end_bound + 1.0, 0.10),
+        ]
 
-        selected_cues = []
-        for i in range(num_buckets):
-            b_start = start_bound + i * step
-            b_end = b_start + step
-            bucket_cues = [c for c in cues if b_start <= c["start"] < b_end]
-            if bucket_cues:
-                best_cue = max(bucket_cues, key=lambda x: len(x.get("text", "")))
-                selected_cues.append(best_cue)
+        act_cues: List[List[Dict[str, Any]]] = [[] for _ in range(5)]
+        for c in cues:
+            s = float(c["start"])
+            placed = False
+            for i, (_, a_start, a_end, _) in enumerate(acts_def):
+                if a_start <= s < a_end or (i == 4 and s >= a_start):
+                    act_cues[i].append(c)
+                    placed = True
+                    break
+            if not placed:
+                act_cues[-1].append(c)
+
+        # Calculate act quotas
+        quotas = [
+            max(1 if len(act_cues[0]) > 0 else 0, int(round(target_capacity * 0.20))),
+            max(1 if len(act_cues[1]) > 0 else 0, int(round(target_capacity * 0.25))),
+            max(1 if len(act_cues[2]) > 0 else 0, int(round(target_capacity * 0.25))),
+            max(1 if len(act_cues[3]) > 0 else 0, int(round(target_capacity * 0.20))),
+            max(1 if len(act_cues[4]) > 0 else 0, target_capacity - sum([
+                int(round(target_capacity * 0.20)),
+                int(round(target_capacity * 0.25)),
+                int(round(target_capacity * 0.25)),
+                int(round(target_capacity * 0.20))
+            ])),
+        ]
+
+        diff = sum(quotas) - target_capacity
+        while diff != 0:
+            if diff > 0:
+                idx = max(range(5), key=lambda i: quotas[i] if quotas[i] > 1 else -1)
+                quotas[idx] -= 1
+                diff -= 1
             else:
-                target_mid = b_start + step / 2.0
-                closest_cue = min(cues, key=lambda x: abs(x["start"] - target_mid))
-                if closest_cue not in selected_cues:
-                    selected_cues.append(closest_cue)
+                idx = max(range(5), key=lambda i: (len(act_cues[i]) - quotas[i], quotas[i]))
+                quotas[idx] += 1
+                diff += 1
 
-        selected_cues.sort(key=lambda x: x["start"])
+        # Deficit reallocation for sparse acts
+        deficit = 0
+        for i in range(5):
+            if len(act_cues[i]) < quotas[i]:
+                deficit += quotas[i] - len(act_cues[i])
+                quotas[i] = len(act_cues[i])
 
-        # Deduplicate while preserving order
-        unique_cues = []
+        while deficit > 0:
+            surplus_acts = [i for i in range(5) if len(act_cues[i]) > quotas[i]]
+            if not surplus_acts:
+                break
+            best_i = max(surplus_acts, key=lambda i: len(act_cues[i]) - quotas[i])
+            quotas[best_i] += 1
+            deficit -= 1
+
+        # Select representative cues per act
+        selected_cues: List[Dict[str, Any]] = []
         seen_starts = set()
-        for c in selected_cues:
-            k = round(c["start"], 1)
-            if k not in seen_starts:
-                seen_starts.add(k)
-                unique_cues.append(c)
+
+        for i in range(5):
+            q = quotas[i]
+            cands = act_cues[i]
+            if q <= 0 or not cands:
+                continue
+            if len(cands) <= q:
+                for c in cands:
+                    k = round(float(c["start"]), 1)
+                    if k not in seen_starts:
+                        seen_starts.add(k)
+                        selected_cues.append(c)
+                continue
+
+            a_start = acts_def[i][1]
+            a_end = acts_def[i][2]
+            a_span = max(1.0, a_end - a_start)
+            sub_step = a_span / float(q)
+
+            chosen_indices = set()
+            for j in range(q):
+                sub_s = a_start + j * sub_step
+                sub_e = sub_s + sub_step
+                bucket = [(idx, c) for idx, c in enumerate(cands) if sub_s <= float(c["start"]) < sub_e and idx not in chosen_indices]
+                if bucket:
+                    best_idx, best_cue = max(bucket, key=lambda pair: ScriptEngine.evaluate_cue_informativeness(pair[1].get("text", "")))
+                    chosen_indices.add(best_idx)
+                    k = round(float(best_cue["start"]), 1)
+                    if k not in seen_starts:
+                        seen_starts.add(k)
+                        selected_cues.append(best_cue)
+                else:
+                    sub_mid = sub_s + sub_step / 2.0
+                    unselected = [(idx, c) for idx, c in enumerate(cands) if idx not in chosen_indices]
+                    if unselected:
+                        best_idx, best_cue = min(unselected, key=lambda pair: abs(float(pair[1]["start"]) - sub_mid))
+                        chosen_indices.add(best_idx)
+                        k = round(float(best_cue["start"]), 1)
+                        if k not in seen_starts:
+                            seen_starts.add(k)
+                            selected_cues.append(best_cue)
+
+        selected_cues.sort(key=lambda x: float(x["start"]))
 
         lines = []
-        for c in unique_cues:
-            sec = c["start"]
+        for c in selected_cues:
+            sec = float(c["start"])
             m = int(sec // 60)
             s = int(sec % 60)
-            text_snippet = c["text"].replace("\n", " ").strip()
+            text_snippet = c.get("text", "").replace("\n", " ").strip()
             text_snippet = re.sub(r'<[^>]+>', '', text_snippet)
             if len(text_snippet) > 85:
                 text_snippet = text_snippet[:82] + "..."
             lines.append(f"[{m:02d}:{s:02d}] {text_snippet}")
 
         return "\n".join(lines)
+
+    @staticmethod
+    def explain_roadmap_coverage(
+        subs_text: str,
+        total_movie_dur: float = 3600.0,
+        target_output_dur_mins: Optional[int] = None,
+        max_points: Optional[int] = None,
+        dialogue_timeline: Optional[List[Dict[str, Any]]] = None
+    ) -> Dict[str, Any]:
+        """
+        Quality and auditing introspection helper for Phase 3A narrative roadmap coverage.
+        Returns exact metrics for source event count, retained counts, act distributions, and boundaries.
+        """
+        from app.services.video_engine import VideoEngine
+
+        cues: List[Dict[str, Any]] = []
+        if dialogue_timeline and len(dialogue_timeline) > 0:
+            cues = [dict(c) for c in dialogue_timeline if c.get("text", "").strip()]
+        else:
+            try:
+                res = VideoEngine.parse_raw_transcript_text(subs_text)
+                cues = res.get("dialogue_timeline", [])
+            except Exception:
+                cues = []
+            if not cues:
+                ts_regex = re.compile(r'\[?((?:\d{1,2}:)?\d{1,3}:\d{2})\]?\s*(.*)')
+                for line in subs_text.splitlines():
+                    l = line.strip()
+                    if not l:
+                        continue
+                    m = ts_regex.match(l)
+                    if m:
+                        ts_str = m.group(1)
+                        txt = m.group(2).strip()
+                        parts = ts_str.split(':')
+                        sec = 0.0
+                        if len(parts) == 2:
+                            sec = int(parts[0]) * 60.0 + float(parts[1])
+                        elif len(parts) == 3:
+                            sec = int(parts[0]) * 3600.0 + int(parts[1]) * 60.0 + float(parts[2])
+                        if txt:
+                            cues.append({"start": sec, "end": sec + 5.0, "text": txt})
+
+        total_source_events = len(cues)
+        roadmap_str = ScriptEngine.compress_transcript_to_roadmap(
+            subs_text=subs_text,
+            total_movie_dur=total_movie_dur,
+            max_points=max_points,
+            target_output_dur_mins=target_output_dur_mins,
+            dialogue_timeline=dialogue_timeline
+        )
+        lines = [l for l in roadmap_str.strip().splitlines() if l.strip().startswith("[")]
+
+        def parse_ts_line(line_str: str) -> Optional[float]:
+            m = re.search(r'\[((?:\d{1,2}:)?\d{1,3}):(\d{2})\]', line_str)
+            if not m:
+                return None
+            prefix = m.group(1)
+            sec_s = float(m.group(2))
+            if ":" in prefix:
+                h, mins = prefix.split(":")
+                return int(h) * 3600.0 + int(mins) * 60.0 + sec_s
+            else:
+                return int(prefix) * 60.0 + sec_s
+
+        earliest_ts = None
+        latest_ts = None
+        if lines:
+            earliest_ts = parse_ts_line(lines[0])
+            latest_ts = parse_ts_line(lines[-1])
+
+        effective_dur = float(total_movie_dur)
+        act_counts = {"act1": 0, "act2a": 0, "act2b": 0, "act3": 0, "epilogue": 0}
+        for l in lines:
+            s = parse_ts_line(l)
+            if s is not None:
+                ratio = s / max(1.0, effective_dur)
+                if ratio < 0.20:
+                    act_counts["act1"] += 1
+                elif ratio < 0.45:
+                    act_counts["act2a"] += 1
+                elif ratio < 0.70:
+                    act_counts["act2b"] += 1
+                elif ratio < 0.90:
+                    act_counts["act3"] += 1
+                else:
+                    act_counts["epilogue"] += 1
+
+        return {
+            "source_event_count": total_source_events,
+            "retained_event_count": len(lines),
+            "retention_ratio": round(len(lines) / max(1, total_source_events), 4),
+            "earliest_timestamp": earliest_ts,
+            "latest_timestamp": latest_ts,
+            "act_breakdown": act_counts,
+            "beginning_coverage": act_counts["act1"] > 0,
+            "middle_coverage": (act_counts["act2a"] + act_counts["act2b"]) > 0,
+            "climax_coverage": act_counts["act3"] > 0,
+            "ending_coverage": act_counts["epilogue"] > 0,
+            "roadmap_lines_count": len(lines),
+        }
 
     @staticmethod
     def parse_storyboard_blocks(
@@ -1531,13 +1826,15 @@ class ScriptEngine:
             beats_section = "\n".join(beats_lines) + "\n"
 
         # Compress transcript into full-movie roadmap if available (prevents truncation)
-        if subs_text and subs_text.strip():
+        if (subs_text and subs_text.strip()) or (dialogue_timeline and len(dialogue_timeline) > 0):
             roadmap = ScriptEngine.compress_transcript_to_roadmap(
-                subs_text=subs_text,
+                subs_text=subs_text or "",
                 total_movie_dur=float(source_video_duration_sec or (duration_mins * 60.0 * 6.0)),
-                max_points=42
+                target_output_dur_mins=duration_mins,
+                dialogue_timeline=dialogue_timeline
             )
-            transcript_section = f"Full-Movie Dialogue & Event Roadmap (Beginning to Climax):\n{roadmap}" if roadmap else f"Source Transcript Highlights:\n{subs_text[:4000]}"
+            fallback_sample = ScriptEngine.extract_balanced_transcript_sample(subs_text or "", max_chars=4000)
+            transcript_section = f"Full-Movie Dialogue & Event Roadmap (Beginning to Climax):\n{roadmap}" if roadmap else f"Source Transcript Highlights:\n{fallback_sample}"
         else:
             transcript_section = "Source Transcript: None provided. Structure narrative from beginning to climax based on plot guide."
 
