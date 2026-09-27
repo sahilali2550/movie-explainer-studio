@@ -1,6 +1,8 @@
 import os
 import re
 import json
+import difflib
+import unicodedata
 import urllib.request
 from dataclasses import dataclass
 from typing import Dict, List, Tuple, Optional, Any
@@ -763,23 +765,123 @@ class ScriptEngine:
             "were", "have", "has", "had", "would", "could", "will", "do",
         }
 
+        def normalize_str(s: str) -> str:
+            if not s:
+                return ""
+            norm = unicodedata.normalize("NFKC", str(s))
+            norm = re.sub(r'[""«»„]', '"', norm)
+            norm = re.sub(r"['']", "'", norm)
+            norm = re.sub(r"[^\w\s]", " ", norm, flags=re.UNICODE)
+            return re.sub(r"\s+", " ", norm.lower(), flags=re.UNICODE).strip()
+
         def tokenize(text: str) -> set:
             """Unicode alpha tokens for English, Urdu, Hindi, Arabic, etc., dropping stop-words and pure digits."""
-            tokens = re.findall(r"\w{2,}", text.lower(), flags=re.UNICODE)
+            if not text:
+                return set()
+            norm = unicodedata.normalize("NFKC", str(text))
+            tokens = re.findall(r"\w{2,}", norm.lower(), flags=re.UNICODE)
             return {t for t in tokens if t not in STOP_WORDS and not t.isdigit()}
 
-        def score_match(block_tokens: set, cue_text: str) -> int:
-            """Token overlap count between block narration and cue text."""
-            cue_tokens = tokenize(cue_text)
-            if not cue_tokens:
-                return 0
-            return len(block_tokens & cue_tokens)
+        def get_stems(w: str) -> set:
+            """Lightweight deterministic English inflection & stem generator."""
+            w = w.lower().strip()
+            if len(w) < 3:
+                return {w}
+            stems = {w}
+            # Plural / 3rd person -s, -es, -ies
+            if w.endswith("ies") and len(w) > 4:
+                stems.add(w[:-3] + "y")
+            elif w.endswith("es") and len(w) > 4 and not w.endswith(("ees", "ies")):
+                stems.add(w[:-2])
+                stems.add(w[:-1])
+            elif w.endswith("s") and len(w) > 3 and not w.endswith(("ss", "us", "is")):
+                stems.add(w[:-1])
+            # Past tense / participle -ed, -ied
+            if w.endswith("ied") and len(w) > 4:
+                stems.add(w[:-3] + "y")
+            elif w.endswith("ed") and len(w) > 4:
+                stems.add(w[:-2])
+                stems.add(w[:-1])
+            # Present participle -ing
+            if w.endswith("ing") and len(w) > 5:
+                base = w[:-3]
+                stems.add(base)
+                stems.add(base + "e")
+                if len(base) >= 3 and base[-1] == base[-2]:
+                    stems.add(base[:-1])
+            # Agent noun -er, -or
+            if w.endswith("er") and len(w) > 4:
+                stems.add(w[:-2])
+                stems.add(w[:-1])
+            elif w.endswith("or") and len(w) > 4:
+                stems.add(w[:-2])
+            # Silent -e
+            if w.endswith("e") and len(w) > 3 and not w.endswith(("ee", "ye", "oe")):
+                stems.add(w[:-1])
+            return stems
 
-        def normalize_str(s: str) -> str:
-            return re.sub(r'[^\w\s]', '', s.lower(), flags=re.UNICODE).strip()
+        def score_match(
+            b_tokens: set,
+            c_tokens: set,
+            b_stems: Optional[Dict[str, set]] = None,
+            c_stems: Optional[Dict[str, set]] = None,
+        ) -> Tuple[int, int, float]:
+            """
+            Phase 2 Deterministic Lexical & Fuzzy Candidate Scoring:
+            1. Exact non-stopword token overlap (weight: 1.0 per exact match).
+            2. Morphological stem overlap & pre-filtered fuzzy match (weight: 0.7 per fuzzy match).
+            Returns (exact_count, fuzzy_count, total_score).
+            """
+            if not b_tokens or not c_tokens:
+                return 0, 0, 0.0
 
-        # Pre-tokenise all blocks once
+            exact = b_tokens & c_tokens
+            exact_count = len(exact)
+
+            unmatched_b = b_tokens - exact
+            unmatched_c = set(c_tokens - exact)
+
+            fuzzy_count = 0
+            if unmatched_b and unmatched_c:
+                for bt in unmatched_b:
+                    if len(bt) < 4:
+                        continue
+                    stems_b = b_stems.get(bt) if b_stems else get_stems(bt)
+                    matched_ct = None
+                    for ct in unmatched_c:
+                        if len(ct) < 4:
+                            continue
+                        stems_c = c_stems.get(ct) if c_stems else get_stems(ct)
+                        # 1. Morphological stem overlap (O(1))
+                        if stems_b and stems_c and (stems_b & stems_c):
+                            matched_ct = ct
+                            break
+                        # 2. Pre-filtered difflib check for OCR/typos
+                        if bt[0] == ct[0] and abs(len(bt) - len(ct)) <= 2:
+                            min_l, max_l = min(len(bt), len(ct)), max(len(bt), len(ct))
+                            if min_l / max_l >= 0.70:
+                                if difflib.SequenceMatcher(None, bt, ct).ratio() >= 0.82:
+                                    matched_ct = ct
+                                    break
+                    if matched_ct:
+                        fuzzy_count += 1
+                        unmatched_c.remove(matched_ct)
+
+            total_score = round(float(exact_count) * 1.0 + float(fuzzy_count) * 0.70, 2)
+            return exact_count, fuzzy_count, total_score
+
+        # Pre-tokenise all blocks and cues once, and precompute stems
         block_token_sets = [tokenize(b.narration_text) for b in blocks]
+        cue_token_sets = [tokenize(c.get("text", "")) for c in dialogue_timeline]
+
+        block_stem_maps = [{t: get_stems(t) for t in ts} for ts in block_token_sets]
+        cue_stem_maps = [{t: get_stems(t) for t in ts} for ts in cue_token_sets]
+
+        tl_start = float(dialogue_timeline[0].get("start", 0.0)) if dialogue_timeline else 0.0
+        tl_end = float(dialogue_timeline[-1].get("start", 0.0)) if dialogue_timeline else 0.0
+        timeline_span = max(1.0, tl_end - tl_start)
+        n_blocks = len(blocks)
+        nominal_spacing = timeline_span / n_blocks if n_blocks > 1 else max(30.0, timeline_span * 0.15)
 
         # Find best-matching cue for each block (greedy, forward-only)
         anchors: List[float] = []  # matched movie_start for each block
@@ -787,47 +889,94 @@ class ScriptEngine:
 
         for b_idx, block in enumerate(blocks):
             b_tokens = block_token_sets[b_idx]
+            b_stems = block_stem_maps[b_idx]
             d_ref = getattr(block, "dialogue_ref", "") or ""
             norm_ref = normalize_str(d_ref) if d_ref else ""
             ref_tokens = tokenize(d_ref) if d_ref else set()
+            ref_stems = {t: get_stems(t) for t in ref_tokens} if ref_tokens else {}
+
+            target_ts = float(getattr(block, "movie_start", 0.0))
+            block_dur = max(10.0, float(getattr(block, "movie_end", target_ts + 30.0)) - target_ts)
+            # Duration-adaptive contextual window radius (Phase 2.1):
+            # - Scales with scene duration and inter-scene spacing.
+            # - Locks to standard 15% span radius (30% total coverage) on medium/long-form content.
+            # - Bounded to at most 25% span radius (50% max coverage) to prevent full-movie dilation on short videos.
+            base_radius = max(block_dur * 1.5, nominal_spacing * 1.5, timeline_span * 0.15)
+            window_radius = max(min(timeline_span * 0.25, base_radius), min(block_dur, timeline_span * 0.5))
 
             if not b_tokens and not ref_tokens:
                 # No meaningful tokens → keep original timestamp
                 anchors.append(block.movie_start)
                 continue
 
-            best_score = 0
-            best_cue_start = None
+            candidates = []
 
-            for cue in dialogue_timeline:
+            for c_idx, cue in enumerate(dialogue_timeline):
                 cue_start = float(cue.get("start", 0.0))
                 # Only consider cues AFTER previous anchor (chronological lock)
                 if cue_start < prev_anchor:
                     continue
                 cue_text = cue.get("text", "")
                 norm_cue = normalize_str(cue_text)
+                cue_tokens = cue_token_sets[c_idx]
+                c_stems = cue_stem_maps[c_idx]
 
-                sc = 0
+                ref_score = 0.0
                 if norm_ref:
                     if norm_ref in norm_cue or (len(norm_ref) > 8 and norm_cue in norm_ref):
-                        sc = 1000 + len(ref_tokens)
+                        ref_score = 1000.0 + len(ref_tokens)
                     else:
-                        ref_overlap = len(ref_tokens & tokenize(cue_text))
-                        if ref_overlap > 0:
-                            sc = 100 * ref_overlap + score_match(b_tokens, cue_text)
-                if sc == 0:
-                    sc = score_match(b_tokens, cue_text)
+                        ref_exact, ref_fuzzy, ref_sc = score_match(ref_tokens, cue_tokens, ref_stems, c_stems)
+                        if ref_sc > 0:
+                            _, _, b_sc = score_match(b_tokens, cue_tokens, b_stems, c_stems)
+                            ref_score = 100.0 * ref_sc + b_sc
 
-                if sc > best_score:
-                    best_score = sc
-                    best_cue_start = cue_start
-                elif sc == best_score and sc > 0 and best_cue_start is not None:
-                    # Tie-break: prefer candidate closer to block's contextual movie_start timestamp
-                    target_ts = float(getattr(block, "movie_start", 0.0))
-                    if abs(cue_start - target_ts) < abs(best_cue_start - target_ts):
-                        best_cue_start = cue_start
+                exact_cnt, fuzzy_cnt, match_sc = score_match(b_tokens, cue_tokens, b_stems, c_stems)
+                dist = abs(cue_start - target_ts)
 
-            if best_score > 0 and best_cue_start is not None:
+                if ref_score > 0.0 or match_sc > 0.0:
+                    candidates.append({
+                        "start": cue_start,
+                        "ref_score": ref_score,
+                        "exact_count": exact_cnt,
+                        "fuzzy_count": fuzzy_cnt,
+                        "match_score": match_sc,
+                        "dist": dist,
+                        "in_primary": dist <= window_radius,
+                    })
+
+            best_cue_start = None
+
+            if candidates:
+                # Stage 1: Explicit dialogue_ref priority (Rule D)
+                ref_cands = [c for c in candidates if c["ref_score"] >= 100.0]
+                if ref_cands:
+                    best_ref = min(ref_cands, key=lambda c: (-c["ref_score"], c["dist"]))
+                    best_cue_start = best_ref["start"]
+                else:
+                    # Stage 2: Strong global exact matches (Rule A)
+                    # When a distant candidate has overwhelming exact evidence (>=3 exact tokens, score >= 3.0),
+                    # it overrides weak nearby fuzzy/incidental evidence.
+                    strong_global = [c for c in candidates if c["exact_count"] >= 3 and c["match_score"] >= 3.0]
+                    in_window = [c for c in candidates if c["in_primary"]]
+                    best_in = max(in_window, key=lambda c: (c["match_score"], -c["dist"])) if in_window else None
+
+                    if strong_global and (not best_in or best_in["match_score"] < 2.5):
+                        best_strong = max(strong_global, key=lambda c: (c["match_score"], -c["dist"]))
+                        best_cue_start = best_strong["start"]
+                    elif best_in and best_in["match_score"] >= 1.4:
+                        # Corroborated evidence in primary contextual window (Rule C: prevents distant incidental hijack)
+                        best_cue_start = best_in["start"]
+                    else:
+                        # Stage 3: Progressive Window Widening
+                        for tier_mult in [1.0, 2.0, 3.0, 999.0]:
+                            tier_cands = [c for c in candidates if c["dist"] <= tier_mult * window_radius]
+                            if tier_cands:
+                                best_tier = max(tier_cands, key=lambda c: (c["match_score"], -c["dist"]))
+                                best_cue_start = best_tier["start"]
+                                break
+
+            if best_cue_start is not None:
                 anchor_start = max(prev_anchor, best_cue_start)
                 anchors.append(anchor_start)
                 prev_anchor = anchor_start
@@ -848,6 +997,111 @@ class ScriptEngine:
             block.movie_end = new_end
 
         return blocks
+
+    @staticmethod
+    def explain_candidate_match(narration_text: str, cue_text: str) -> Dict[str, Any]:
+        """
+        Test and auditing helper for source-grounding transparency (Phase 2 Step 9).
+        Provides a deterministic breakdown of tokens, exact matches, morphological stems, and scores.
+        """
+        import difflib
+        import re
+        import unicodedata
+
+        STOP_WORDS = {
+            "a", "an", "the", "is", "in", "it", "of", "to", "and", "or",
+            "on", "at", "by", "as", "be", "we", "he", "she", "his", "her",
+            "was", "are", "this", "that", "with", "for", "from", "not",
+            "but", "so", "if", "its", "into", "up", "out", "now", "then",
+            "were", "have", "has", "had", "would", "could", "will", "do",
+        }
+
+        def tokenize(text: str) -> set:
+            if not text:
+                return set()
+            norm = unicodedata.normalize("NFKC", str(text))
+            tokens = re.findall(r"\w{2,}", norm.lower(), flags=re.UNICODE)
+            return {t for t in tokens if t not in STOP_WORDS and not t.isdigit()}
+
+        def get_stems(w: str) -> set:
+            w = w.lower().strip()
+            if len(w) < 3:
+                return {w}
+            stems = {w}
+            if w.endswith("ies") and len(w) > 4:
+                stems.add(w[:-3] + "y")
+            elif w.endswith("es") and len(w) > 4 and not w.endswith(("ees", "ies")):
+                stems.add(w[:-2])
+                stems.add(w[:-1])
+            elif w.endswith("s") and len(w) > 3 and not w.endswith(("ss", "us", "is")):
+                stems.add(w[:-1])
+            if w.endswith("ied") and len(w) > 4:
+                stems.add(w[:-3] + "y")
+            elif w.endswith("ed") and len(w) > 4:
+                stems.add(w[:-2])
+                stems.add(w[:-1])
+            if w.endswith("ing") and len(w) > 5:
+                base = w[:-3]
+                stems.add(base)
+                stems.add(base + "e")
+                if len(base) >= 3 and base[-1] == base[-2]:
+                    stems.add(base[:-1])
+            if w.endswith("er") and len(w) > 4:
+                stems.add(w[:-2])
+                stems.add(w[:-1])
+            elif w.endswith("or") and len(w) > 4:
+                stems.add(w[:-2])
+            if w.endswith("e") and len(w) > 3 and not w.endswith(("ee", "ye", "oe")):
+                stems.add(w[:-1])
+            return stems
+
+        b_tokens = tokenize(narration_text)
+        c_tokens = tokenize(cue_text)
+        exact = sorted(list(b_tokens & c_tokens))
+        exact_count = len(exact)
+
+        unmatched_b = b_tokens - set(exact)
+        unmatched_c = set(c_tokens - set(exact))
+
+        fuzzy_pairs = []
+        if unmatched_b and unmatched_c:
+            for bt in unmatched_b:
+                if len(bt) < 4:
+                    continue
+                stems_b = get_stems(bt)
+                matched_ct = None
+                match_type = ""
+                for ct in unmatched_c:
+                    if len(ct) < 4:
+                        continue
+                    stems_c = get_stems(ct)
+                    if stems_b & stems_c:
+                        matched_ct = ct
+                        match_type = "morphological_stem"
+                        break
+                    if bt[0] == ct[0] and abs(len(bt) - len(ct)) <= 2:
+                        min_l, max_l = min(len(bt), len(ct)), max(len(bt), len(ct))
+                        if min_l / max_l >= 0.70:
+                            if difflib.SequenceMatcher(None, bt, ct).ratio() >= 0.82:
+                                matched_ct = ct
+                                match_type = "sequence_matcher"
+                                break
+                if matched_ct:
+                    fuzzy_pairs.append((bt, matched_ct, match_type))
+                    unmatched_c.remove(matched_ct)
+
+        fuzzy_count = len(fuzzy_pairs)
+        score = round(float(exact_count) * 1.0 + float(fuzzy_count) * 0.70, 2)
+
+        return {
+            "narration_tokens": sorted(list(b_tokens)),
+            "cue_tokens": sorted(list(c_tokens)),
+            "exact_matches": exact,
+            "exact_count": exact_count,
+            "fuzzy_pairs": fuzzy_pairs,
+            "fuzzy_count": fuzzy_count,
+            "match_score": score,
+        }
 
     @staticmethod
     def assign_narration_timing(
