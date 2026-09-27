@@ -388,12 +388,14 @@ async def generate_script_endpoint(
 
     source_dur = 0.0
     dialogue_timeline = []
+    transcript_source = "none"
     if custom_transcript and custom_transcript.strip():
         log_event(f"📋 Ingesting user-pasted transcript ({len(custom_transcript)} chars) directly...", "INFO")
         parsed_t = VideoEngine.parse_raw_transcript_text(custom_transcript)
         subs = parsed_t.get("subtitles_text", "")
         source_dur = float(parsed_t.get("total_duration", 0) or 0)
         dialogue_timeline = parsed_t.get("dialogue_timeline", [])
+        transcript_source = "user_transcript"
         log_event(f"⚡ Instant transcript processed! {len(dialogue_timeline)} timed cues mapped. Bypassing YouTube download delay!", "SUCCESS")
     elif url and ("youtube.com" in url or "youtu.be" in url):
         log_event(f"🌐 Fetching metadata & subtitles from YouTube: {url[:50]}...", "INFO")
@@ -404,7 +406,46 @@ async def generate_script_endpoint(
         source_dur = float(info.get("duration", 0) or 0)
         dialogue_timeline = info.get("dialogue_timeline", [])
         if subs:
+            transcript_source = "existing_subtitles"
             log_event(f"📝 Extracted {len(subs)} characters of dialogue transcripts & timeline milestones (Source: {round(source_dur/60, 1)}m)", "INFO")
+
+    # Priority 3: Automated ASR Ingestion (Phase 6A) if no usable transcript exists
+    if not dialogue_timeline:
+        asr_media_path = None
+        cleanup_asr_media = False
+        if local_file and local_file.filename:
+            clean_ext = os.path.splitext(local_file.filename)[1].lower() or ".mp4"
+            asr_media_path = str(TEMP_DIR / f"{job_id}_local_media{clean_ext}")
+            save_upload_with_limit(local_file, asr_media_path, MAX_VIDEO_BYTES)
+            cleanup_asr_media = True
+
+        if asr_media_path and os.path.exists(asr_media_path):
+            log_event("🎙️ No subtitles found. Invoking Automated Speech Recognition (ASR) on source media...", "INFO")
+            from app.services.asr_engine import ASREngine
+            try:
+                asr_cues, asr_subs, asr_src = await asyncio.to_thread(
+                    ASREngine.transcribe_media_to_dialogue,
+                    media_path=asr_media_path,
+                    temp_dir=str(TEMP_DIR),
+                    job_id=job_id
+                )
+                if asr_cues:
+                    dialogue_timeline = asr_cues
+                    subs = asr_subs
+                    transcript_source = asr_src
+                    if source_dur <= 0:
+                        source_dur = VideoEngine.get_duration(asr_media_path)
+                    log_event(f"⚡ ASR successfully extracted {len(dialogue_timeline)} dialogue cues (transcript_source=asr)", "SUCCESS")
+                else:
+                    log_event("⚠️ ASR produced no usable dialogue cues, continuing with non-transcript fallback", "WARNING")
+            except Exception as e:
+                log_event(f"⚠️ ASR invocation failed ({e}), continuing with non-transcript fallback", "WARNING")
+            finally:
+                if cleanup_asr_media and os.path.exists(asr_media_path):
+                    try:
+                        os.remove(asr_media_path)
+                    except OSError:
+                        pass
 
     if persona == "auto" or mood == "auto" or genre == "auto" or spoiler_mode == "auto":
         detected = ScriptEngine.auto_detect_creative_context(
@@ -446,7 +487,9 @@ async def generate_script_endpoint(
     h_score = raw_hook.get("score", 0) if isinstance(raw_hook, dict) else (raw_hook or 0)
     log_event(f"✍️ Storyboard script ready! ({result.get('actual_words', result.get('target_words', 0))} words • Hook Score: {h_score}/100)", "SUCCESS")
     result["title"] = movie_title
+    result["transcript_source"] = transcript_source
     return result
+
 
 @router.post("/expand-script")
 async def expand_script_endpoint(
@@ -573,10 +616,12 @@ async def render_video_endpoint(
     try:
         # 1. Parse Storyboard Script and Anchor Scenes to Dialogue
         dialogue_timeline = []
+        transcript_source = "none"
         raw_transcript = (transcript_text or "").strip()
         if raw_transcript:
             parsed_trans = VideoEngine.parse_raw_transcript_text(raw_transcript)
             dialogue_timeline = parsed_trans.get("dialogue_timeline", [])
+            transcript_source = "user_transcript"
         elif url and VideoEngine.is_valid_youtube_url(url):
             try:
                 info = VideoEngine.extract_youtube_info(url, str(TEMP_DIR), job_id)
@@ -584,15 +629,48 @@ async def render_video_endpoint(
                 if subs_raw:
                     parsed_trans = VideoEngine.parse_raw_transcript_text(subs_raw)
                     dialogue_timeline = parsed_trans.get("dialogue_timeline", [])
+                    transcript_source = "existing_subtitles"
             except Exception as e:
                 log_event(f"⚠️ Subtitle/dialogue extraction failed, continuing without dialogue timeline: {e}", "WARNING")
+
+        # Phase 6A: Ingest local video early if needed so ASR can run when no subtitles exist
+        if local_file and local_file.filename and not os.path.exists(raw_video_path):
+            log_event(f"📁 Ingesting local video file: {local_file.filename}", "INFO")
+            save_upload_with_limit(local_file, raw_video_path, MAX_VIDEO_BYTES)
+            movie_title = os.path.splitext(local_file.filename)[0]
+
+        # Phase 6A: If still no dialogue timeline, attempt ASR on available media
+        if not dialogue_timeline:
+            media_for_asr = None
+            try:
+                if raw_video_path and os.path.exists(raw_video_path) and os.path.getsize(raw_video_path) > 0:
+                    media_for_asr = raw_video_path
+            except OSError:
+                media_for_asr = None
+            if media_for_asr:
+                log_event("🎙️ No subtitles found. Invoking ASR on local media for scene synchronization...", "INFO")
+                from app.services.asr_engine import ASREngine
+                try:
+                    asr_cues, asr_subs, asr_src = await asyncio.to_thread(
+                        ASREngine.transcribe_media_to_dialogue,
+                        media_path=media_for_asr,
+                        temp_dir=str(TEMP_DIR),
+                        job_id=job_id
+                    )
+                    if asr_cues:
+                        dialogue_timeline = asr_cues
+                        transcript_source = asr_src
+                        log_event(f"⚡ ASR generated {len(dialogue_timeline)} dialogue cues for scene grounding (transcript_source=asr)", "SUCCESS")
+                except Exception as e:
+                    log_event(f"⚠️ ASR invocation failed ({e}), continuing with non-transcript fallback", "WARNING")
 
         clean_narration, scene_ranges, scene_subs = ScriptEngine.parse_storyboard(script_text)
         embedding_prov = ScriptEngine.get_configured_embedding_provider()
         scene_blocks = ScriptEngine.parse_storyboard_blocks(
             script_text,
             dialogue_timeline=dialogue_timeline,
-            embedding_provider=embedding_prov
+            embedding_provider=embedding_prov,
+            transcript_source=transcript_source
         )
         if scene_blocks:
             scene_ranges = [(b.movie_start, b.movie_end) for b in scene_blocks]
@@ -643,9 +721,10 @@ async def render_video_endpoint(
 
         # 3. Ingest Video Source with Bulletproof Footage Integrity
         if local_file and local_file.filename:
-            log_event(f"📁 Ingesting local video file: {local_file.filename}", "INFO")
-            save_upload_with_limit(local_file, raw_video_path, MAX_VIDEO_BYTES)
-            movie_title = os.path.splitext(local_file.filename)[0]
+            if not os.path.exists(raw_video_path):
+                log_event(f"📁 Ingesting local video file: {local_file.filename}", "INFO")
+                save_upload_with_limit(local_file, raw_video_path, MAX_VIDEO_BYTES)
+                movie_title = os.path.splitext(local_file.filename)[0]
         elif url:
             log_event("🌐 Ensuring footage integrity from YouTube...", "INFO")
             raw_video_path = await asyncio.to_thread(
@@ -940,6 +1019,22 @@ async def render_batch_endpoint(
                 raise HTTPException(status_code=400, detail="Failed to download YouTube video.")
         else:
             raise HTTPException(status_code=400, detail="Must provide either a YouTube URL or video file.")
+
+        # Phase 6A: ASR for batch endpoint if no dialogue timeline exists
+        if not dialogue_timeline and raw_video_path and os.path.exists(raw_video_path):
+            from app.services.asr_engine import ASREngine
+            try:
+                asr_cues, asr_subs, asr_src = await asyncio.to_thread(
+                    ASREngine.transcribe_media_to_dialogue,
+                    media_path=raw_video_path,
+                    temp_dir=str(TEMP_DIR),
+                    job_id=job_id
+                )
+                if asr_cues:
+                    dialogue_timeline = asr_cues
+                    log_event(f"⚡ [Batch] ASR extracted {len(dialogue_timeline)} dialogue cues (transcript_source=asr)", "SUCCESS")
+            except Exception as e:
+                log_event(f"⚠️ [Batch] ASR invocation failed: {e}", "WARNING")
 
         results_by_lang = {}
 
@@ -1495,10 +1590,12 @@ async def run_autopilot_endpoint(
 
         # Step 2: Parse script for scene timestamps and clean narration (Dialogue-Anchored)
         dialogue_timeline = []
+        transcript_source = "none"
         raw_transcript = (transcript_text or "").strip()
         if raw_transcript:
             parsed_trans = VideoEngine.parse_raw_transcript_text(raw_transcript)
             dialogue_timeline = parsed_trans.get("dialogue_timeline", [])
+            transcript_source = "user_transcript"
         elif url and VideoEngine.is_valid_youtube_url(url):
             try:
                 info = VideoEngine.extract_youtube_info(url, str(TEMP_DIR), job_id)
@@ -1506,15 +1603,37 @@ async def run_autopilot_endpoint(
                 if subs_raw:
                     parsed_trans = VideoEngine.parse_raw_transcript_text(subs_raw)
                     dialogue_timeline = parsed_trans.get("dialogue_timeline", [])
+                    transcript_source = "existing_subtitles"
             except Exception as e:
                 log_event(f"⚠️ [Autopilot] Subtitle/dialogue extraction failed for job {job_id}, continuing without it: {e}", "WARNING")
+
+        # Phase 6A: Ingest local video early for autopilot if ASR is needed
+        if local_file and not dialogue_timeline:
+            safe_name = os.path.basename(local_file.filename or "upload.mp4")
+            raw_video_path = str(TEMP_DIR / f"autopilot_local_{job_id}_{safe_name}")
+            save_upload_with_limit(local_file, raw_video_path, MAX_VIDEO_BYTES)
+            from app.services.asr_engine import ASREngine
+            try:
+                asr_cues, asr_subs, asr_src = await asyncio.to_thread(
+                    ASREngine.transcribe_media_to_dialogue,
+                    media_path=raw_video_path,
+                    temp_dir=str(TEMP_DIR),
+                    job_id=job_id
+                )
+                if asr_cues:
+                    dialogue_timeline = asr_cues
+                    transcript_source = asr_src
+                    log_event(f"⚡ [Autopilot] ASR extracted {len(dialogue_timeline)} dialogue cues (transcript_source=asr)", "SUCCESS")
+            except Exception as e:
+                log_event(f"⚠️ [Autopilot] ASR invocation failed: {e}", "WARNING")
 
         clean_narration, scene_ranges, scene_subs = ScriptEngine.parse_storyboard(final_script)
         embedding_prov = ScriptEngine.get_configured_embedding_provider()
         scene_blocks = ScriptEngine.parse_storyboard_blocks(
             final_script,
             dialogue_timeline=dialogue_timeline,
-            embedding_provider=embedding_prov
+            embedding_provider=embedding_prov,
+            transcript_source=transcript_source
         )
         if scene_blocks:
             scene_ranges = [(b.movie_start, b.movie_end) for b in scene_blocks]
@@ -1545,9 +1664,10 @@ async def run_autopilot_endpoint(
 
         # Step 4: Ingest Video Source with Bulletproof Footage Integrity
         if local_file:
-            safe_name = os.path.basename(local_file.filename or "upload.mp4")
-            raw_video_path = str(TEMP_DIR / f"autopilot_local_{job_id}_{safe_name}")
-            save_upload_with_limit(local_file, raw_video_path, MAX_VIDEO_BYTES)
+            if not raw_video_path or not os.path.exists(raw_video_path):
+                safe_name = os.path.basename(local_file.filename or "upload.mp4")
+                raw_video_path = str(TEMP_DIR / f"autopilot_local_{job_id}_{safe_name}")
+                save_upload_with_limit(local_file, raw_video_path, MAX_VIDEO_BYTES)
         elif clean_url:
             log_event("🌐 [Autopilot] Ensuring footage integrity from YouTube...", "INFO")
             raw_video_path = await asyncio.to_thread(

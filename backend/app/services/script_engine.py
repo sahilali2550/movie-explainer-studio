@@ -40,6 +40,7 @@ class SceneBlock:
     is_authoritative: bool = False   # True once locked to actual synthesized TTS audio
     evidence_ref: Optional[str] = None # Phase 3B evidence packet reference (e.g. "EP-001")
     story_step: Optional[int] = None   # Phase 3B story plan step number
+    transcript_source: str = "none"    # Phase 6A: Source of dialogue cues ("existing_subtitles", "user_transcript", "asr", "none")
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -58,6 +59,7 @@ class SceneBlock:
             "is_authoritative": self.is_authoritative,
             "evidence_ref": self.evidence_ref,
             "story_step": self.story_step,
+            "transcript_source": self.transcript_source,
         }
 
 
@@ -1835,7 +1837,8 @@ STRICT GROUNDING RULES:
     def parse_storyboard_blocks(
         raw_script: str,
         dialogue_timeline: Optional[List[Dict[str, Any]]] = None,
-        embedding_provider: Optional[Any] = None
+        embedding_provider: Optional[Any] = None,
+        transcript_source: Optional[str] = None
     ) -> List[SceneBlock]:
         """
         Parses structured SceneBlock objects pairing each scene timestamp cut [SCENE: MM:SS - MM:SS]
@@ -1973,6 +1976,17 @@ STRICT GROUNDING RULES:
                 dialogue_timeline,
                 embedding_provider=embedding_provider
             )
+
+        # Phase 6A: Tag blocks with transcript source if provided or inferred
+        resolved_source = transcript_source
+        if not resolved_source:
+            if dialogue_timeline and len(dialogue_timeline) > 0:
+                resolved_source = dialogue_timeline[0].get("source", "existing_subtitles")
+            else:
+                resolved_source = "none"
+
+        for b in blocks:
+            b.transcript_source = resolved_source
 
         return blocks
 

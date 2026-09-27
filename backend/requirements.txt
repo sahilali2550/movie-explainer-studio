@@ -16,6 +16,9 @@ yt-dlp~=2024.8.6
 edge-tts~=7.2.0
 Pillow~=10.4.0
 
+# Speech Recognition / ASR (Phase 6A)
+faster-whisper~=1.1.0
+
 # Subtitles & Multilingual NLP
 deep-translator~=1.11.4
 arabic-reshaper~=3.0.0
