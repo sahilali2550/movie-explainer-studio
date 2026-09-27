@@ -1,6 +1,8 @@
 import os
 import re
 import json
+import math
+import hashlib
 import difflib
 import unicodedata
 import urllib.request
@@ -124,6 +126,132 @@ class StoryPlanItem:
             "budget_words": self.budget_words,
             "is_inferred": self.is_inferred
         }
+
+
+# =============================================================================
+# PHASE 5: CONTROLLED SEMANTIC RETRIEVAL ABSTRACTION & HELPERS
+# =============================================================================
+
+class EmbeddingProvider:
+    """
+    Abstract Base Class for semantic embedding providers (Phase 5).
+    Decouples core business logic from specific vendors and ensures safe error handling.
+    """
+    def embed_text(self, text: str) -> Optional[List[float]]:
+        """Embeds a single string into a vector. Returns list of floats or None on failure."""
+        raise NotImplementedError
+
+    def embed_batch(self, texts: List[str]) -> List[Optional[List[float]]]:
+        """Embeds a batch of strings. Returns list of vectors (or None per item on failure)."""
+        return [self.embed_text(t) for t in texts]
+
+
+class DictEmbeddingProvider(EmbeddingProvider):
+    """
+    Deterministic embedding provider for unit tests, adversarial benchmarks,
+    and controlled mock embedding maps (Phase 5).
+    """
+    def __init__(
+        self,
+        vector_map: Optional[Dict[str, List[float]]] = None,
+        default_dim: int = 4
+    ):
+        self.vector_map = vector_map or {}
+        self.default_dim = default_dim
+        self.failure_mode = False
+        self.dimension_mismatch_mode = False
+        self.malformed_mode = False
+
+    def embed_text(self, text: str) -> Optional[List[float]]:
+        if self.failure_mode:
+            raise RuntimeError("Simulated embedding provider failure")
+        if not text:
+            return None
+        if self.malformed_mode:
+            return [float("nan"), float("inf")]
+        if self.dimension_mismatch_mode:
+            return [1.0] * (self.default_dim + 2)
+        clean = text.strip()
+        if clean in self.vector_map:
+            return self.vector_map[clean]
+        clean_lower = clean.lower()
+        for k, v in self.vector_map.items():
+            if k.lower() == clean_lower:
+                return v
+        for k, v in self.vector_map.items():
+            if k.lower() in clean_lower or clean_lower in k.lower():
+                return v
+        return None
+
+
+def cosine_similarity(v1: Any, v2: Any) -> float:
+    """
+    Safe pure-Python cosine similarity computation (Phase 5).
+    Guarantees finite output in [-1.0, 1.0], zero-drift, and complete safety against:
+    - None, empty, or mismatched-dimension vectors
+    - Non-numeric or non-finite values (NaN, +Inf, -Inf)
+    - Zero-norm vectors
+    """
+    if not v1 or not v2:
+        return 0.0
+    try:
+        if len(v1) != len(v2):
+            return 0.0
+        dot = 0.0
+        norm1 = 0.0
+        norm2 = 0.0
+        for a, b in zip(v1, v2):
+            if not isinstance(a, (int, float)) or not isinstance(b, (int, float)):
+                return 0.0
+            if not math.isfinite(a) or not math.isfinite(b):
+                return 0.0
+            dot += float(a) * float(b)
+            norm1 += float(a) * float(a)
+            norm2 += float(b) * float(b)
+        if norm1 <= 0.0 or norm2 <= 0.0:
+            return 0.0
+        sim = dot / (math.sqrt(norm1) * math.sqrt(norm2))
+        return round(max(-1.0, min(1.0, sim)), 4)
+    except Exception:
+        return 0.0
+
+
+class SemanticEmbeddingCache:
+    """
+    Bounded in-memory cache for dialogue cue embeddings (Phase 5).
+    Keys on SHA-256 hash of normalized text to avoid recomputing vectors
+    for unchanged cues across repetitive scene blocks.
+    """
+    def __init__(self, max_size: int = 5000):
+        self.max_size = max(1, max_size)
+        self._cache: Dict[str, List[float]] = {}
+        self._order: List[str] = []
+
+    def _key(self, text: str) -> str:
+        return hashlib.sha256(text.strip().encode("utf-8")).hexdigest()
+
+    def get(self, text: str) -> Optional[List[float]]:
+        k = self._key(text)
+        return self._cache.get(k)
+
+    def put(self, text: str, vec: List[float]) -> None:
+        if not vec:
+            return
+        k = self._key(text)
+        if k in self._cache:
+            self._cache[k] = vec
+            return
+        if len(self._cache) >= self.max_size and self._order:
+            oldest = self._order.pop(0)
+            self._cache.pop(oldest, None)
+        self._cache[k] = vec
+        self._order.append(k)
+
+    def __len__(self) -> int:
+        return len(self._cache)
+
+
+_GLOBAL_EMBEDDING_CACHE = SemanticEmbeddingCache(max_size=5000)
 
 
 class ScriptEngine:
@@ -1450,7 +1578,8 @@ STRICT GROUNDING RULES:
     @staticmethod
     def parse_storyboard_blocks(
         raw_script: str,
-        dialogue_timeline: Optional[List[Dict[str, Any]]] = None
+        dialogue_timeline: Optional[List[Dict[str, Any]]] = None,
+        embedding_provider: Optional[Any] = None
     ) -> List[SceneBlock]:
         """
         Parses structured SceneBlock objects pairing each scene timestamp cut [SCENE: MM:SS - MM:SS]
@@ -1460,6 +1589,7 @@ STRICT GROUNDING RULES:
         the source movie transcript), anchor_scenes_to_dialogue() is called automatically after
         parsing to replace AI-invented timestamps with real movie timestamps.
         Omit dialogue_timeline for backward-compatible behavior.
+        Phase 5: Optional embedding_provider enables controlled semantic candidate retrieval.
         """
         if not raw_script:
             return []
@@ -1582,7 +1712,11 @@ STRICT GROUNDING RULES:
 
         # T-03: Auto-anchor to real dialogue timestamps when timeline is provided
         if dialogue_timeline:
-            blocks = ScriptEngine.anchor_scenes_to_dialogue(blocks, dialogue_timeline)
+            blocks = ScriptEngine.anchor_scenes_to_dialogue(
+                blocks,
+                dialogue_timeline,
+                embedding_provider=embedding_provider
+            )
 
         return blocks
 
@@ -1591,7 +1725,11 @@ STRICT GROUNDING RULES:
         blocks: List["SceneBlock"],
         dialogue_timeline: List[Dict[str, Any]],
         min_scene_dur: float = 5.0,
-        max_scene_dur: float = 90.0
+        max_scene_dur: float = 90.0,
+        embedding_provider: Optional[Any] = None,
+        semantic_top_k: int = 5,
+        min_semantic_sim: float = 0.40,
+        semantic_weight: float = 1.50
     ) -> List["SceneBlock"]:
         """
         Dialogue-Anchor Algorithm (T-01).
@@ -1752,6 +1890,31 @@ STRICT GROUNDING RULES:
         n_blocks = len(blocks)
         nominal_spacing = timeline_span / n_blocks if n_blocks > 1 else max(30.0, timeline_span * 0.15)
 
+        # Phase 5: Pre-embed dialogue timeline cues if embedding provider is supplied
+        cue_embeddings: List[Optional[List[float]]] = []
+        if embedding_provider is not None:
+            try:
+                for c in dialogue_timeline:
+                    txt = c.get("text", "")
+                    if not txt:
+                        cue_embeddings.append(None)
+                        continue
+                    cached = _GLOBAL_EMBEDDING_CACHE.get(txt)
+                    if cached is not None:
+                        cue_embeddings.append(cached)
+                    else:
+                        v = embedding_provider.embed_text(txt)
+                        if v and isinstance(v, list):
+                            _GLOBAL_EMBEDDING_CACHE.put(txt, v)
+                            cue_embeddings.append(v)
+                        else:
+                            cue_embeddings.append(None)
+            except Exception as e:
+                # Security Rule 8: log failure details and fallback
+                print(f"[SemanticRetrieval Notice] Cue embedding failed, falling back to lexical: {e}")
+                embedding_provider = None
+                cue_embeddings = []
+
         # Find best-matching cue for each block (greedy, forward-only)
         anchors: List[float] = []  # matched movie_start for each block
         prev_anchor = 0.0
@@ -1773,8 +1936,16 @@ STRICT GROUNDING RULES:
             base_radius = max(block_dur * 1.5, nominal_spacing * 1.5, timeline_span * 0.15)
             window_radius = max(min(timeline_span * 0.25, base_radius), min(block_dur, timeline_span * 0.5))
 
-            if not b_tokens and not ref_tokens:
-                # No meaningful tokens → keep original timestamp
+            block_vec = None
+            if embedding_provider is not None and getattr(block, "narration_text", ""):
+                try:
+                    block_vec = embedding_provider.embed_text(block.narration_text)
+                except Exception as e:
+                    print(f"[SemanticRetrieval Notice] Query embedding failed for block {b_idx}: {e}")
+                    block_vec = None
+
+            if not b_tokens and not ref_tokens and block_vec is None:
+                # No meaningful tokens and no semantic vector → keep original timestamp
                 anchors.append(block.movie_start)
                 continue
 
@@ -1803,13 +1974,26 @@ STRICT GROUNDING RULES:
                 exact_cnt, fuzzy_cnt, match_sc = score_match(b_tokens, cue_tokens, b_stems, c_stems)
                 dist = abs(cue_start - target_ts)
 
-                if ref_score > 0.0 or match_sc > 0.0:
+                # Phase 5: Semantic similarity & composite scoring
+                sem_sim = 0.0
+                sem_bonus = 0.0
+                if block_vec is not None and c_idx < len(cue_embeddings) and cue_embeddings[c_idx] is not None:
+                    sem_sim = cosine_similarity(block_vec, cue_embeddings[c_idx])
+                    if sem_sim >= min_semantic_sim:
+                        sem_bonus = round(sem_sim * semantic_weight, 2)
+
+                combined_sc = round(match_sc + sem_bonus, 2)
+
+                if ref_score > 0.0 or match_sc > 0.0 or sem_bonus > 0.0:
                     candidates.append({
                         "start": cue_start,
                         "ref_score": ref_score,
                         "exact_count": exact_cnt,
                         "fuzzy_count": fuzzy_cnt,
                         "match_score": match_sc,
+                        "semantic_score": sem_sim,
+                        "semantic_bonus": sem_bonus,
+                        "combined_score": combined_sc,
                         "dist": dist,
                         "in_primary": dist <= window_radius,
                     })
@@ -1828,12 +2012,12 @@ STRICT GROUNDING RULES:
                     # it overrides weak nearby fuzzy/incidental evidence.
                     strong_global = [c for c in candidates if c["exact_count"] >= 3 and c["match_score"] >= 3.0]
                     in_window = [c for c in candidates if c["in_primary"]]
-                    best_in = max(in_window, key=lambda c: (c["match_score"], -c["dist"])) if in_window else None
+                    best_in = max(in_window, key=lambda c: (c["combined_score"], -c["dist"])) if in_window else None
 
-                    if strong_global and (not best_in or best_in["match_score"] < 2.5):
+                    if strong_global and (not best_in or best_in["combined_score"] < 2.5):
                         best_strong = max(strong_global, key=lambda c: (c["match_score"], -c["dist"]))
                         best_cue_start = best_strong["start"]
-                    elif best_in and best_in["match_score"] >= 1.4:
+                    elif best_in and best_in["combined_score"] >= 1.4:
                         # Corroborated evidence in primary contextual window (Rule C: prevents distant incidental hijack)
                         best_cue_start = best_in["start"]
                     else:
@@ -1841,7 +2025,7 @@ STRICT GROUNDING RULES:
                         for tier_mult in [1.0, 2.0, 3.0, 999.0]:
                             tier_cands = [c for c in candidates if c["dist"] <= tier_mult * window_radius]
                             if tier_cands:
-                                best_tier = max(tier_cands, key=lambda c: (c["match_score"], -c["dist"]))
+                                best_tier = max(tier_cands, key=lambda c: (c["combined_score"], -c["dist"]))
                                 best_cue_start = best_tier["start"]
                                 break
 
@@ -1868,10 +2052,15 @@ STRICT GROUNDING RULES:
         return blocks
 
     @staticmethod
-    def explain_candidate_match(narration_text: str, cue_text: str) -> Dict[str, Any]:
+    def explain_candidate_match(
+        narration_text: str,
+        cue_text: str,
+        embedding_provider: Optional[Any] = None
+    ) -> Dict[str, Any]:
         """
-        Test and auditing helper for source-grounding transparency (Phase 2 Step 9).
-        Provides a deterministic breakdown of tokens, exact matches, morphological stems, and scores.
+        Test and auditing helper for source-grounding transparency (Phase 2 Step 9 / Phase 5).
+        Provides a deterministic breakdown of tokens, exact matches, morphological stems,
+        and optional semantic similarity metrics.
         """
         import difflib
         import re
@@ -1962,7 +2151,19 @@ STRICT GROUNDING RULES:
         fuzzy_count = len(fuzzy_pairs)
         score = round(float(exact_count) * 1.0 + float(fuzzy_count) * 0.70, 2)
 
-        return {
+        sem_sim = 0.0
+        combined_sc = score
+        if embedding_provider is not None:
+            try:
+                v1 = embedding_provider.embed_text(narration_text)
+                v2 = embedding_provider.embed_text(cue_text)
+                sem_sim = cosine_similarity(v1, v2)
+                sem_bonus = round(sem_sim * 1.50, 2) if sem_sim >= 0.40 else 0.0
+                combined_sc = round(score + sem_bonus, 2)
+            except Exception as e:
+                print(f"[SemanticRetrieval Notice] explain_candidate_match embedding failed: {e}")
+
+        res = {
             "narration_tokens": sorted(list(b_tokens)),
             "cue_tokens": sorted(list(c_tokens)),
             "exact_matches": exact,
@@ -1971,6 +2172,11 @@ STRICT GROUNDING RULES:
             "fuzzy_count": fuzzy_count,
             "match_score": score,
         }
+        if embedding_provider is not None:
+            res["semantic_similarity"] = sem_sim
+            res["combined_score"] = combined_sc
+
+        return res
 
     @staticmethod
     def assign_narration_timing(
