@@ -8,7 +8,7 @@ import requests
 import unicodedata
 import urllib.request
 from dataclasses import dataclass
-from typing import Dict, List, Tuple, Optional, Any
+from typing import Dict, List, Tuple, Optional, Any, Union
 from deep_translator import GoogleTranslator, MyMemoryTranslator
 from app.core.config import SUPPORTED_LANGUAGES, STORY_PERSONAS
 
@@ -32,7 +32,7 @@ class SceneBlock:
     speech_dur: float = 0.0     # actual allocated speech duration (seconds)
     narration_start: float = 0.0 # start timestamp in explainer voiceover
     narration_end: float = 0.0   # end timestamp in explainer voiceover
-    dialogue_ref: str = ""       # exact dialogue quote or reference from source movie
+    dialogue_ref: Optional[str] = None # exact dialogue quote or reference from source movie (verified source-bound or None)
     estimated_duration: float = 0.0  # pre-TTS estimated narration duration (seconds)
     actual_duration: float = 0.0     # authoritative measured TTS duration (seconds)
     audio_file: Optional[str] = None # path or identifier of synthesized audio file
@@ -128,6 +128,42 @@ class StoryPlanItem:
             "narration_purpose": self.narration_purpose,
             "budget_words": self.budget_words,
             "is_inferred": self.is_inferred
+        }
+
+
+@dataclass
+class DialogueRefProvenance:
+    """
+    Phase 6F: Source-Bound Dialogue Reference Provenance Representation.
+    Enforces strict provenance verification: a dialogue_ref MUST trace directly to
+    an authoritative EvidencePacket or source transcript cue. Unverified or hallucinated
+    dialogue references are safely converted to None (null).
+    """
+    status: str                         # "SOURCE_BOUND" or "NOT_SOURCE_BOUND"
+    is_source_bound: bool
+    dialogue_ref: Optional[str]         # verified clean reference, or None if NOT_SOURCE_BOUND
+    source_text: Optional[str] = None   # actual source text where match was found
+    evidence_ref: Optional[str] = None  # packet_id (e.g. "EP-001") if matched to an EvidencePacket
+    cue_index: Optional[int] = None     # index into source cues if matched
+    source_timestamp: Optional[float] = None # start timestamp of source cue/packet
+    match_type: Optional[str] = None    # "exact", "normalized_exact", "source_contained_excerpt", "source_contains_excerpt", "none"
+    normalized_ref: str = ""
+    normalized_source: str = ""
+    reason: str = ""
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "status": self.status,
+            "is_source_bound": self.is_source_bound,
+            "dialogue_ref": self.dialogue_ref,
+            "evidence_ref": self.evidence_ref,
+            "source_text": self.source_text,
+            "source_timestamp": self.source_timestamp,
+            "cue_index": self.cue_index,
+            "match_type": self.match_type,
+            "normalized_ref": self.normalized_ref,
+            "normalized_source": self.normalized_source,
+            "reason": self.reason
         }
 
 
@@ -1744,6 +1780,288 @@ STRICT GROUNDING RULES:
             "traceability_chain": chain
         }
 
+    # =========================================================================
+    # PHASE 6F: SOURCE-BOUND DIALOGUE REFERENCE INTEGRITY & PROVENANCE
+    # =========================================================================
+
+    @staticmethod
+    def normalize_dialogue_text(s: str) -> str:
+        """
+        Phase 6F: Normalizes dialogue text to tolerate harmless casing, whitespace,
+        punctuation, contraction, and Unicode differences without changing semantic content.
+        """
+        if not s:
+            return ""
+        norm = unicodedata.normalize("NFKC", str(s))
+        # Replace stylized quotation marks
+        norm = re.sub(r'[""«»„“”‘’`]', '"', norm)
+        # Common speech/dialogue speaker prefixes like 'Peter: "..."' or 'Hero: '
+        norm = re.sub(r'^\s*[A-Za-z0-9_\s]{1,25}:\s*', '', norm)
+        # Common contraction handling
+        norm = re.sub(r"\b(\w+)n['\"]t\b", r"\1 not", norm, flags=re.IGNORECASE)
+        norm = re.sub(r"\b(\w+)['\"]re\b", r"\1 are", norm, flags=re.IGNORECASE)
+        norm = re.sub(r"\b(\w+)['\"]ve\b", r"\1 have", norm, flags=re.IGNORECASE)
+        norm = re.sub(r"\b(\w+)['\"]ll\b", r"\1 will", norm, flags=re.IGNORECASE)
+        norm = re.sub(r"\b(\w+)['\"]d\b", r"\1 would", norm, flags=re.IGNORECASE)
+        norm = re.sub(r"\b(\w+)['\"]m\b", r"\1 am", norm, flags=re.IGNORECASE)
+        norm = re.sub(r"\b(\w+)['\"]s\b", r"\1s", norm, flags=re.IGNORECASE)
+        # Strip punctuation characters including Urdu/Hindi punctuation
+        norm = re.sub(r'[^\w\s]', ' ', norm, flags=re.UNICODE)
+        return re.sub(r'\s+', ' ', norm.lower(), flags=re.UNICODE).strip()
+
+    @staticmethod
+    def score_ref_against_source(
+        clean_ref: str,
+        clean_src: str,
+        precomputed_norm_ref: Optional[str] = None,
+        precomputed_ref_toks: Optional[set] = None,
+        precomputed_ref_sentences: Optional[List[str]] = None
+    ) -> Optional[Tuple[float, str, str, str]]:
+        """
+        Phase 6F: Evaluates provenance match strength between candidate dialogue_ref and source text.
+        Returns (score, match_type, norm_ref, norm_src) if valid, else None.
+        Enforces that generic partial matches or single common words are never treated as valid source quotes.
+        """
+        if not clean_ref or not clean_src:
+            return None
+
+        clean_r = clean_ref.strip().strip('"\'“”‘’')
+        clean_s = clean_src.strip().strip('"\'“”‘’')
+        if not clean_r or not clean_s:
+            return None
+
+        if clean_r == clean_s:
+            return (1000.0, "exact", clean_r, clean_s)
+
+        norm_ref = precomputed_norm_ref if precomputed_norm_ref is not None else ScriptEngine.normalize_dialogue_text(clean_r)
+        norm_src = ScriptEngine.normalize_dialogue_text(clean_s)
+
+        if not norm_ref or not norm_src:
+            return None
+
+        if norm_ref == norm_src:
+            return (900.0, "normalized_exact", norm_ref, norm_src)
+
+        stop_words = {
+            "a", "an", "the", "is", "in", "it", "of", "to", "and", "or",
+            "on", "at", "by", "as", "be", "we", "he", "she", "his", "her",
+            "was", "are", "this", "that", "with", "for", "from", "not",
+            "but", "so", "if", "its", "into", "up", "out", "now", "then",
+            "were", "have", "has", "had", "would", "could", "will", "do",
+            "don", "didn", "doesn", "wasn", "weren", "haven", "hasn", "hadn",
+            "won", "wouldn", "couldn", "shouldn", "isn", "aren", "ain",
+            "ve", "re", "ll", "d", "m", "kind", "sort",
+        }
+
+        ref_toks = precomputed_ref_toks if precomputed_ref_toks is not None else {t for t in re.findall(r"\w{2,}", norm_ref.lower(), flags=re.UNICODE) if t not in stop_words and not t.isdigit()}
+        src_toks = {t for t in re.findall(r"\w{2,}", norm_src.lower(), flags=re.UNICODE) if t not in stop_words and not t.isdigit()}
+
+        # 1. Reference is a substantive contiguous excerpt of source cue (Case B & Section 9)
+        if norm_ref in norm_src:
+            is_substantive = any(len(t) >= 4 for t in ref_toks) or len(ref_toks) >= 2 or len(norm_ref) >= 8
+            if is_substantive:
+                return (500.0 + len(norm_ref), "source_contained_excerpt", norm_ref, norm_src)
+
+        # 2. Multi-sentence reference where at least one substantive sentence is in source
+        ref_sentences = precomputed_ref_sentences if precomputed_ref_sentences is not None else [s.strip() for s in re.split(r'[\.\!\?\;\n]+', clean_r) if s.strip()]
+        if len(ref_sentences) > 1:
+            best_sent_sc = 0.0
+            for r_s in ref_sentences:
+                n_rs = ScriptEngine.normalize_dialogue_text(r_s)
+                t_rs = {t for t in re.findall(r"\w{2,}", n_rs.lower(), flags=re.UNICODE) if t not in stop_words and not t.isdigit()}
+                if n_rs and n_rs in norm_src:
+                    if len(n_rs) >= 8 or any(len(t) >= 4 for t in t_rs) or len(t_rs) >= 2:
+                        best_sent_sc = max(best_sent_sc, 450.0 + len(n_rs))
+            if best_sent_sc > 0.0:
+                return (best_sent_sc, "source_contained_excerpt", norm_ref, norm_src)
+
+        # 3. Source cue is a substantive excerpt of reference (e.g. multi-cue dialogue)
+        # Must NOT match single generic words like "You." or "What?"
+        if norm_src in norm_ref:
+            distinctive_src = any(len(t) >= 5 for t in src_toks)
+            if len(norm_src) >= 10 and (len(src_toks) >= 2 or distinctive_src):
+                return (300.0 + len(norm_src), "source_contains_excerpt", norm_ref, norm_src)
+
+        # 4. Multi-sentence source cue where at least one substantive sentence is in ref
+        src_sentences = [s.strip() for s in re.split(r'[\.\!\?\;\n]+', clean_s) if s.strip()]
+        if len(src_sentences) > 1:
+            best_sent_sc = 0.0
+            for c_s in src_sentences:
+                n_cs = ScriptEngine.normalize_dialogue_text(c_s)
+                t_cs = {t for t in re.findall(r"\w{2,}", n_cs.lower(), flags=re.UNICODE) if t not in stop_words and not t.isdigit()}
+                if n_cs and n_cs in norm_ref:
+                    if len(n_cs) >= 10 and (len(t_cs) >= 2 or any(len(t) >= 5 for t in t_cs)):
+                        best_sent_sc = max(best_sent_sc, 250.0 + len(n_cs))
+            if best_sent_sc > 0.0:
+                return (best_sent_sc, "source_contains_excerpt", norm_ref, norm_src)
+
+        return None
+
+    @staticmethod
+    def validate_dialogue_ref_provenance(
+        dialogue_ref: Optional[str],
+        evidence_packets: Optional[List[Any]] = None,
+        dialogue_timeline: Optional[List[Dict[str, Any]]] = None,
+        source_text: Optional[str] = None
+    ) -> DialogueRefProvenance:
+        """
+        Phase 6F: Deterministic validation answering: Is this dialogue_ref actually source-bound?
+        Distinguishes SOURCE_BOUND vs NOT_SOURCE_BOUND.
+        Traceable to EvidencePacket -> source cue -> timestamp.
+        """
+        if not dialogue_ref or not str(dialogue_ref).strip():
+            return DialogueRefProvenance(
+                status="NOT_SOURCE_BOUND",
+                is_source_bound=False,
+                dialogue_ref=None,
+                reason="empty_dialogue_ref"
+            )
+
+        clean_ref = str(dialogue_ref).strip().strip('"\'“”‘’')
+        norm_ref = ScriptEngine.normalize_dialogue_text(clean_ref)
+
+        has_packets = evidence_packets is not None and len(evidence_packets) > 0
+        has_timeline = dialogue_timeline is not None and len(dialogue_timeline) > 0
+        has_source_text = bool(source_text and str(source_text).strip())
+
+        if not has_packets and not has_timeline and not has_source_text:
+            return DialogueRefProvenance(
+                status="NOT_SOURCE_BOUND",
+                is_source_bound=False,
+                dialogue_ref=None,
+                normalized_ref=norm_ref,
+                reason="no_source_evidence_available"
+            )
+
+        stop_words = {
+            "a", "an", "the", "is", "in", "it", "of", "to", "and", "or",
+            "on", "at", "by", "as", "be", "we", "he", "she", "his", "her",
+            "was", "are", "this", "that", "with", "for", "from", "not",
+            "but", "so", "if", "its", "into", "up", "out", "now", "then",
+            "were", "have", "has", "had", "would", "could", "will", "do",
+            "don", "didn", "doesn", "wasn", "weren", "haven", "hasn", "hadn",
+            "won", "wouldn", "couldn", "shouldn", "isn", "aren", "ain",
+            "ve", "re", "ll", "d", "m", "kind", "sort",
+        }
+        ref_toks = {t for t in re.findall(r"\w{2,}", norm_ref.lower(), flags=re.UNICODE) if t not in stop_words and not t.isdigit()}
+        ref_sentences = [s.strip() for s in re.split(r'[\.\!\?\;\n]+', clean_ref) if s.strip()]
+
+        best_match = None
+        best_score = 0.0
+
+        # 1. Preferred Source of Truth: Phase 3B EvidencePackets
+        if has_packets:
+            for pkt in evidence_packets:
+                p_text = pkt.get("source_text", "") if isinstance(pkt, dict) else getattr(pkt, "source_text", "")
+                p_id = pkt.get("packet_id", "") if isinstance(pkt, dict) else getattr(pkt, "packet_id", "")
+                p_start = pkt.get("movie_start", 0.0) if isinstance(pkt, dict) else getattr(pkt, "movie_start", 0.0)
+                p_cue_idx = pkt.get("cue_index", None) if isinstance(pkt, dict) else getattr(pkt, "cue_index", None)
+
+                m = ScriptEngine.score_ref_against_source(
+                    clean_ref,
+                    p_text,
+                    precomputed_norm_ref=norm_ref,
+                    precomputed_ref_toks=ref_toks,
+                    precomputed_ref_sentences=ref_sentences
+                )
+                if m and m[0] > best_score:
+                    sc, m_type, n_ref, n_src = m
+                    best_score = sc
+                    best_match = DialogueRefProvenance(
+                        status="SOURCE_BOUND",
+                        is_source_bound=True,
+                        dialogue_ref=clean_ref,
+                        source_text=p_text,
+                        evidence_ref=p_id,
+                        cue_index=p_cue_idx,
+                        source_timestamp=float(p_start),
+                        match_type=m_type,
+                        normalized_ref=n_ref,
+                        normalized_source=n_src,
+                        reason=f"matched_evidence_packet_{p_id}"
+                    )
+
+        # 2. Source cues in dialogue_timeline
+        if has_timeline:
+            for c_idx, cue in enumerate(dialogue_timeline):
+                c_text = cue.get("text", "")
+                c_start = float(cue.get("start", 0.0))
+
+                m = ScriptEngine.score_ref_against_source(
+                    clean_ref,
+                    c_text,
+                    precomputed_norm_ref=norm_ref,
+                    precomputed_ref_toks=ref_toks,
+                    precomputed_ref_sentences=ref_sentences
+                )
+                if m and m[0] > best_score:
+                    sc, m_type, n_ref, n_src = m
+                    best_score = sc
+                    best_match = DialogueRefProvenance(
+                        status="SOURCE_BOUND",
+                        is_source_bound=True,
+                        dialogue_ref=clean_ref,
+                        source_text=c_text,
+                        cue_index=c_idx,
+                        source_timestamp=c_start,
+                        match_type=m_type,
+                        normalized_ref=n_ref,
+                        normalized_source=n_src,
+                        reason=f"matched_source_cue_{c_idx}"
+                    )
+                    if best_score >= 1000.0:
+                        break
+
+        # 3. Direct source_text string
+        if has_source_text:
+            m = ScriptEngine.score_ref_against_source(
+                clean_ref,
+                source_text,
+                precomputed_norm_ref=norm_ref,
+                precomputed_ref_toks=ref_toks,
+                precomputed_ref_sentences=ref_sentences
+            )
+            if m and m[0] > best_score:
+                sc, m_type, n_ref, n_src = m
+                best_score = sc
+                best_match = DialogueRefProvenance(
+                    status="SOURCE_BOUND",
+                    is_source_bound=True,
+                    dialogue_ref=clean_ref,
+                    source_text=source_text,
+                    match_type=m_type,
+                    normalized_ref=n_ref,
+                    normalized_source=n_src,
+                    reason="matched_source_text"
+                )
+
+        if best_match is not None:
+            return best_match
+
+        return DialogueRefProvenance(
+            status="NOT_SOURCE_BOUND",
+            is_source_bound=False,
+            dialogue_ref=None,
+            normalized_ref=norm_ref,
+            reason="no_source_match_found"
+        )
+
+    @staticmethod
+    def is_dialogue_ref_source_bound(
+        dialogue_ref: Optional[str],
+        evidence_packets: Optional[List[Any]] = None,
+        dialogue_timeline: Optional[List[Dict[str, Any]]] = None,
+        source_text: Optional[str] = None
+    ) -> bool:
+        """Convenience boolean check for source-bound provenance."""
+        res = ScriptEngine.validate_dialogue_ref_provenance(
+            dialogue_ref=dialogue_ref,
+            evidence_packets=evidence_packets,
+            dialogue_timeline=dialogue_timeline,
+            source_text=source_text
+        )
+        return res.is_source_bound
+
     @staticmethod
     def get_configured_embedding_provider() -> Optional[EmbeddingProvider]:
         """
@@ -1838,7 +2156,10 @@ STRICT GROUNDING RULES:
         raw_script: str,
         dialogue_timeline: Optional[List[Dict[str, Any]]] = None,
         embedding_provider: Optional[Any] = None,
-        transcript_source: Optional[str] = None
+        transcript_source: Optional[str] = None,
+        evidence_packets: Optional[List[Any]] = None,
+        story_plan: Optional[List[Any]] = None,
+        enforce_source_provenance: Optional[bool] = None
     ) -> List[SceneBlock]:
         """
         Parses structured SceneBlock objects pairing each scene timestamp cut [SCENE: MM:SS - MM:SS]
@@ -1849,6 +2170,8 @@ STRICT GROUNDING RULES:
         parsing to replace AI-invented timestamps with real movie timestamps.
         Omit dialogue_timeline for backward-compatible behavior.
         Phase 5: Optional embedding_provider enables controlled semantic candidate retrieval.
+        Phase 6F: Source-bound dialogue reference validation strictly enforces that non-null
+        dialogue_ref must be traceable to source evidence (EvidencePacket or dialogue_timeline).
         """
         if not raw_script:
             return []
@@ -1904,9 +2227,9 @@ STRICT GROUNDING RULES:
                     chunk,
                     flags=re.IGNORECASE
                 )
-                dialogue_ref = ""
+                raw_d_ref = ""
                 if d_ref_m:
-                    dialogue_ref = (d_ref_m.group(1) or d_ref_m.group(2) or "").strip().strip('"\'“”‘’')
+                    raw_d_ref = (d_ref_m.group(1) or d_ref_m.group(2) or "").strip().strip('"\'“”‘’')
 
                 cleaned = clean_narration_chunk(chunk)
                 if not cleaned and idx == 0:
@@ -1914,12 +2237,37 @@ STRICT GROUNDING RULES:
 
                 w_count = len(cleaned.split()) if cleaned else 0
                 if cleaned and w_count > 0:
+                    dialogue_ref = raw_d_ref if raw_d_ref else None
+                    evidence_ref = None
+
+                    # Phase 6F: Source-Bound Dialogue Reference Validation
+                    # If source evidence is available (dialogue_timeline, evidence_packets, or enforce flag),
+                    # strictly verify provenance. If not source-bound, safely convert to None (null).
+                    should_validate = enforce_source_provenance if enforce_source_provenance is not None else (
+                        (dialogue_timeline is not None) or (evidence_packets is not None)
+                    )
+                    if should_validate:
+                        if dialogue_ref:
+                            prov = ScriptEngine.validate_dialogue_ref_provenance(
+                                dialogue_ref=dialogue_ref,
+                                evidence_packets=evidence_packets,
+                                dialogue_timeline=dialogue_timeline
+                            )
+                            if prov.is_source_bound:
+                                dialogue_ref = prov.dialogue_ref
+                                evidence_ref = prov.evidence_ref
+                            else:
+                                dialogue_ref = None
+                        else:
+                            dialogue_ref = None
+
                     blocks.append(SceneBlock(
                         movie_start=s_sec,
                         movie_end=e_sec,
                         narration_text=cleaned,
                         word_count=w_count,
-                        dialogue_ref=dialogue_ref
+                        dialogue_ref=dialogue_ref,
+                        evidence_ref=evidence_ref
                     ))
 
         if not blocks:
@@ -1976,6 +2324,21 @@ STRICT GROUNDING RULES:
                 dialogue_timeline,
                 embedding_provider=embedding_provider
             )
+
+        # Phase 3B/6F: Link story_plan and evidence_ref to SceneBlocks if provided
+        if story_plan and blocks:
+            for b in blocks:
+                b_start = float(b.movie_start)
+                matched_plan = min(
+                    story_plan,
+                    key=lambda it: abs(float(it.get("source_timestamp", 0.0) if isinstance(it, dict) else getattr(it, "source_timestamp", 0.0)) - b_start)
+                )
+                plan_step = matched_plan.get("step") if isinstance(matched_plan, dict) else getattr(matched_plan, "step", None)
+                plan_ref = matched_plan.get("evidence_ref") if isinstance(matched_plan, dict) else getattr(matched_plan, "evidence_ref", None)
+                if not b.story_step and plan_step is not None:
+                    b.story_step = plan_step
+                if not b.evidence_ref and plan_ref:
+                    b.evidence_ref = plan_ref
 
         # Phase 6A: Tag blocks with transcript source if provided or inferred
         resolved_source = transcript_source
@@ -3409,6 +3772,7 @@ FORMATTING & AI DIRECTOR REQUIREMENTS:
    Your narrative text here...
 
    - MANDATORY DIALOGUE REFERENCE: You MUST include [DIALOGUE_REF: "..."] with the exact quote or phrase from the source transcript/roadmap that occurs at this moment. The video studio relies on this exact reference to lock the visual cut with 100% precision.
+   - SOURCE-BOUND INTEGRITY: Do NOT invent, paraphrase, or hallucinate fictional dialogue quotes in [DIALOGUE_REF: "..."]. Every dialogue reference must match an actual spoken sentence from the Source Evidence Packets or Roadmap above. If a scene depicts visual action without spoken dialogue, omit [DIALOGUE_REF: ...] entirely. Any invented dialogue reference will be automatically invalidated.
    - Anchor your timestamps to the chronological Full-Movie Roadmap and 5-Act Milestones above!
    - Match your timestamps directly to the actual dialogues/events in the Roadmap. When narrating what a character says, or a major action (gunfire, chase, explosion, confrontation), use the real timestamp from the dialogue roadmap where that event happens.
    - Do NOT invent arbitrary or fictional timestamps. The video studio cuts the exact video footage at these timestamps to sync with your voiceover!
