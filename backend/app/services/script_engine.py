@@ -2040,6 +2040,10 @@ STRICT GROUNDING RULES:
             "was", "are", "this", "that", "with", "for", "from", "not",
             "but", "so", "if", "its", "into", "up", "out", "now", "then",
             "were", "have", "has", "had", "would", "could", "will", "do",
+            # Contraction stems & conversational fillers (Phase 6E.2 hardening)
+            "don", "didn", "doesn", "wasn", "weren", "haven", "hasn", "hadn",
+            "won", "wouldn", "couldn", "shouldn", "isn", "aren", "ain",
+            "ve", "re", "ll", "d", "m", "kind", "sort",
         }
 
         def normalize_str(s: str) -> str:
@@ -2048,6 +2052,12 @@ STRICT GROUNDING RULES:
             norm = unicodedata.normalize("NFKC", str(s))
             norm = re.sub(r'[""«»„]', '"', norm)
             norm = re.sub(r"['']", "'", norm)
+            norm = re.sub(r"n't\b", " not", norm)
+            norm = re.sub(r"'re\b", " are", norm)
+            norm = re.sub(r"'ve\b", " have", norm)
+            norm = re.sub(r"'ll\b", " will", norm)
+            norm = re.sub(r"'d\b", " would", norm)
+            norm = re.sub(r"'m\b", " am", norm)
             norm = re.sub(r"[^\w\s]", " ", norm, flags=re.UNICODE)
             return re.sub(r"\s+", " ", norm.lower(), flags=re.UNICODE).strip()
 
@@ -2056,8 +2066,24 @@ STRICT GROUNDING RULES:
             if not text:
                 return set()
             norm = unicodedata.normalize("NFKC", str(text))
+            norm = re.sub(r"n't\b", " not", norm)
+            norm = re.sub(r"'re\b", " are", norm)
+            norm = re.sub(r"'ve\b", " have", norm)
+            norm = re.sub(r"'ll\b", " will", norm)
+            norm = re.sub(r"'d\b", " would", norm)
+            norm = re.sub(r"'m\b", " am", norm)
             tokens = re.findall(r"\w{2,}", norm.lower(), flags=re.UNICODE)
             return {t for t in tokens if t not in STOP_WORDS and not t.isdigit()}
+
+        def longest_common_substring(s1: str, s2: str) -> str:
+            """Finds the longest contiguous common substring between two normalized strings."""
+            if not s1 or not s2:
+                return ""
+            matcher = difflib.SequenceMatcher(None, s1, s2)
+            match = matcher.find_longest_match(0, len(s1), 0, len(s2))
+            if match.size > 0:
+                return s1[match.a : match.a + match.size].strip()
+            return ""
 
         def get_stems(w: str) -> set:
             """Lightweight deterministic English inflection & stem generator."""
@@ -2198,8 +2224,10 @@ STRICT GROUNDING RULES:
                 embedding_provider = None
                 cue_embeddings = []
 
-        # Find best-matching cue for each block (greedy, forward-only)
+        # Find best-matching cue for each block (monotonic grounding with anchor integrity hardening)
         anchors: List[float] = []  # matched movie_start for each block
+        anchor_strengths: List[bool] = []  # True if strong anchor, False if weak or fallback
+        last_strong_anchor = 0.0
         prev_anchor = 0.0
 
         for b_idx, block in enumerate(blocks):
@@ -2237,15 +2265,18 @@ STRICT GROUNDING RULES:
 
             if not b_tokens and not ref_tokens and block_vec is None:
                 # No meaningful tokens and no semantic vector → keep original timestamp
-                anchors.append(block.movie_start)
+                fallback = max(last_strong_anchor, max(prev_anchor, block.movie_start))
+                anchors.append(fallback)
+                anchor_strengths.append(False)
+                prev_anchor = fallback
                 continue
 
             candidates = []
 
             for c_idx, cue in enumerate(dialogue_timeline):
                 cue_start = float(cue.get("start", 0.0))
-                # Only consider cues AFTER previous anchor (chronological lock)
-                if cue_start < prev_anchor:
+                # Only consider cues AFTER the last strong anchor (chronological anchor lock)
+                if cue_start < last_strong_anchor:
                     continue
                 cue_text = cue.get("text", "")
                 norm_cue = normalize_str(cue_text)
@@ -2254,13 +2285,47 @@ STRICT GROUNDING RULES:
 
                 ref_score = 0.0
                 if norm_ref:
-                    if norm_ref in norm_cue or (len(norm_ref) > 8 and norm_cue in norm_ref):
+                    # Phase 6E.2 Hardening: Substantive dialogue_ref match vs generic conversational overlap
+                    # 1. Direct quote substring containment
+                    is_quote_contained = norm_ref in norm_cue and (
+                        len(norm_ref) >= 8 and (len(ref_tokens) >= 2 or any(len(t) >= 5 for t in ref_tokens))
+                    )
+                    is_cue_subquote = norm_cue in norm_ref and (
+                        len(norm_cue) >= 8 and (len(cue_tokens) >= 2 or any(len(t) >= 5 for t in cue_tokens))
+                    )
+                    if is_quote_contained:
                         ref_score = 1000.0 + len(ref_tokens)
+                    elif is_cue_subquote:
+                        ref_score = 1000.0 + len(cue_tokens)
                     else:
-                        ref_exact, ref_fuzzy, ref_sc = score_match(ref_tokens, cue_tokens, ref_stems, c_stems)
-                        if ref_sc > 0:
-                            _, _, b_sc = score_match(b_tokens, cue_tokens, b_stems, c_stems)
-                            ref_score = 100.0 * ref_sc + b_sc
+                        # 2. Sentence / clause verbatim containment (e.g. multi-sentence quotes like Scene 02)
+                        ref_sentences = [s.strip() for s in re.split(r'[\.\!\?\;\n]+', block.dialogue_ref or "") if s.strip()]
+                        cue_sentences = [s.strip() for s in re.split(r'[\.\!\?\;\n]+', cue_text or "") if s.strip()]
+
+                        matched_sent_score = 0.0
+                        for r_s in ref_sentences:
+                            n_rs = normalize_str(r_s)
+                            if n_rs and n_rs in norm_cue:
+                                t_rs = tokenize(n_rs)
+                                if len(n_rs) >= 8 and (len(t_rs) >= 2 or any(len(t) >= 5 for t in t_rs)):
+                                    matched_sent_score = max(matched_sent_score, 1000.0 + len(t_rs))
+
+                        for c_s in cue_sentences:
+                            n_cs = normalize_str(c_s)
+                            if n_cs and n_cs in norm_ref:
+                                t_cs = tokenize(n_cs)
+                                if len(n_cs) >= 8 and (len(t_cs) >= 2 or any(len(t) >= 5 for t in t_cs)):
+                                    matched_sent_score = max(matched_sent_score, 1000.0 + len(t_cs))
+
+                        if matched_sent_score > 0.0:
+                            ref_score = matched_sent_score
+                        elif ref_tokens and cue_tokens:
+                            # 3. High substantive recall with at least two distinctive content words (len >= 6)
+                            matched = ref_tokens & cue_tokens
+                            distinctive_matched = [t for t in matched if len(t) >= 6]
+                            recall = len(matched) / len(ref_tokens)
+                            if len(distinctive_matched) >= 2 and recall >= 0.70:
+                                ref_score = 500.0 + 10.0 * len(matched)
 
                 exact_cnt, fuzzy_cnt, match_sc = score_match(b_tokens, cue_tokens, b_stems, c_stems)
                 dist = abs(cue_start - target_ts)
@@ -2274,6 +2339,8 @@ STRICT GROUNDING RULES:
                         sem_bonus = round(sem_sim * semantic_weight, 2)
 
                 combined_sc = round(match_sc + sem_bonus, 2)
+                matching_exact_tokens = b_tokens & cue_tokens
+                max_exact_token_len = max((len(t) for t in matching_exact_tokens), default=0)
 
                 if ref_score > 0.0 or match_sc > 0.0 or sem_bonus > 0.0:
                     candidates.append({
@@ -2287,16 +2354,66 @@ STRICT GROUNDING RULES:
                         "combined_score": combined_sc,
                         "dist": dist,
                         "in_primary": dist <= window_radius,
+                        "max_exact_token_len": max_exact_token_len,
                     })
 
-            best_cue_start = None
+            def qualifies_for_tier(cand: dict, tier_mult: float) -> bool:
+                """Phase 6E Requirement A: Outlier rejection for progressive widening tiers."""
+                if cand["ref_score"] >= 100.0:
+                    return True
+                # Tier 1.0 (inside primary contextual window)
+                if tier_mult <= 1.0:
+                    return cand["combined_score"] >= 1.0 or cand["match_score"] >= 1.0
+                # Tier 2.0 (dist <= 2.0 * window_radius)
+                if tier_mult <= 2.0:
+                    if cand["exact_count"] >= 2 or cand["semantic_bonus"] >= 0.70 or cand["combined_score"] >= 1.4:
+                        return True
+                    if cand["exact_count"] >= 1 and cand.get("max_exact_token_len", 0) >= 7:
+                        return True
+                    return False
+                # Tier 3.0 (dist <= 3.0 * window_radius)
+                if tier_mult <= 3.0:
+                    if cand["exact_count"] >= 2 or cand["semantic_bonus"] >= 0.70 or cand["combined_score"] >= 1.7:
+                        return True
+                    if cand["exact_count"] >= 1 and cand.get("max_exact_token_len", 0) >= 7:
+                        return True
+                    return False
+                # Global Tier (tier_mult > 3.0, e.g. 999.0):
+                # Rejects distant incidental single words (taking, work, time, man, help, get, make).
+                # Requires >=2 exact tokens, semantic support (>=0.70), composite score >=2.0,
+                # or a distinctive long keyword (>=8 chars, e.g. "prophecy").
+                if cand["exact_count"] >= 2 or cand["semantic_bonus"] >= 0.70 or cand["combined_score"] >= 2.0:
+                    return True
+                if cand["exact_count"] >= 1 and cand.get("max_exact_token_len", 0) >= 8:
+                    return True
+                return False
+
+            def is_candidate_strong(cand: Optional[dict]) -> bool:
+                """Phase 6E Requirement B: Classify candidate confidence to prevent forward starvation."""
+                if cand is None:
+                    return False
+                if cand["ref_score"] >= 100.0:
+                    return True
+                if cand["exact_count"] >= 2:
+                    return True
+                if cand["match_score"] >= 2.0:
+                    return True
+                if cand["semantic_bonus"] >= 0.70:
+                    return True
+                if cand["in_primary"] and cand["combined_score"] >= 1.4:
+                    return True
+                if cand["dist"] <= 2.0 * window_radius and cand.get("max_exact_token_len", 0) >= 8 and cand["combined_score"] >= 1.0:
+                    return True
+                return False
+
+            best_cand = None
 
             if candidates:
                 # Stage 1: Explicit dialogue_ref priority (Rule D)
                 ref_cands = [c for c in candidates if c["ref_score"] >= 100.0]
                 if ref_cands:
                     best_ref = min(ref_cands, key=lambda c: (-c["ref_score"], c["dist"]))
-                    best_cue_start = best_ref["start"]
+                    best_cand = best_ref
                 else:
                     # Stage 2: Strong global exact matches (Rule A)
                     # When a distant candidate has overwhelming exact evidence (>=3 exact tokens, score >= 3.0),
@@ -2306,29 +2423,96 @@ STRICT GROUNDING RULES:
                     best_in = max(in_window, key=lambda c: (c["combined_score"], -c["dist"])) if in_window else None
 
                     if strong_global and (not best_in or best_in["combined_score"] < 2.5):
-                        best_strong = max(strong_global, key=lambda c: (c["match_score"], -c["dist"]))
-                        best_cue_start = best_strong["start"]
+                        best_cand = max(strong_global, key=lambda c: (c["match_score"], -c["dist"]))
                     elif best_in and best_in["combined_score"] >= 1.4:
                         # Corroborated evidence in primary contextual window (Rule C: prevents distant incidental hijack)
-                        best_cue_start = best_in["start"]
+                        best_cand = best_in
                     else:
-                        # Stage 3: Progressive Window Widening
+                        # Stage 3: Progressive Window Widening with Outlier Rejection
                         for tier_mult in [1.0, 2.0, 3.0, 999.0]:
-                            tier_cands = [c for c in candidates if c["dist"] <= tier_mult * window_radius]
+                            tier_cands = [
+                                c for c in candidates
+                                if c["dist"] <= tier_mult * window_radius and qualifies_for_tier(c, tier_mult)
+                            ]
                             if tier_cands:
-                                best_tier = max(tier_cands, key=lambda c: (c["combined_score"], -c["dist"]))
-                                best_cue_start = best_tier["start"]
+                                best_cand = max(tier_cands, key=lambda c: (c["combined_score"], -c["dist"]))
                                 break
 
-            if best_cue_start is not None:
-                anchor_start = max(prev_anchor, best_cue_start)
+            strong = is_candidate_strong(best_cand)
+
+            if best_cand is not None:
+                cue_ts = best_cand["start"]
+                if strong:
+                    # Strong anchor: can anchor at cue_ts (>= last_strong_anchor) and advance both bounds
+                    anchor_start = cue_ts
+                    last_strong_anchor = cue_ts
+                    prev_anchor = cue_ts
+                else:
+                    # Weak anchor: respects forward progress from prev_anchor
+                    anchor_start = max(prev_anchor, cue_ts)
+                    prev_anchor = anchor_start
                 anchors.append(anchor_start)
-                prev_anchor = anchor_start
+                anchor_strengths.append(strong)
             else:
                 # No match → keep original AI timestamp but respect chronological order
-                fallback = max(prev_anchor, block.movie_start)
+                fallback = max(last_strong_anchor, max(prev_anchor, block.movie_start))
                 anchors.append(fallback)
+                anchor_strengths.append(False)
                 prev_anchor = fallback
+
+        # Phase 6E: Chronological Reconciliation Pass
+        # Reconciles weak/fallback anchors between established strong anchors to prevent forward starvation
+        strong_indices = [i for i, s in enumerate(anchor_strengths) if s]
+        has_inversion = any(anchors[i] > anchors[i + 1] for i in range(len(anchors) - 1))
+
+        if has_inversion:
+            if not strong_indices:
+                # No strong anchors: monotonic forward clamp
+                for i in range(1, len(anchors)):
+                    anchors[i] = max(anchors[i], anchors[i - 1])
+            else:
+                # Reconcile segment before first strong anchor
+                first_strong_idx = strong_indices[0]
+                first_strong_ts = anchors[first_strong_idx]
+                first_orig_ts = blocks[first_strong_idx].movie_start
+                for k in range(first_strong_idx):
+                    if anchors[k] > first_strong_ts:
+                        if first_orig_ts > tl_start:
+                            r = max(0.0, min(1.0, (blocks[k].movie_start - tl_start) / (first_orig_ts - tl_start)))
+                            anchors[k] = round(tl_start + r * (first_strong_ts - tl_start), 2)
+                        else:
+                            f = (k + 1) / (first_strong_idx + 1)
+                            anchors[k] = round(tl_start + f * (first_strong_ts - tl_start), 2)
+                for k in range(1, first_strong_idx):
+                    anchors[k] = max(anchors[k], anchors[k - 1])
+
+                # Reconcile segments between consecutive strong anchors
+                for s_i in range(len(strong_indices) - 1):
+                    idx_prev = strong_indices[s_i]
+                    idx_next = strong_indices[s_i + 1]
+                    ts_prev = anchors[idx_prev]
+                    ts_next = anchors[idx_next]
+                    orig_prev = blocks[idx_prev].movie_start
+                    orig_next = blocks[idx_next].movie_start
+
+                    sub = list(range(idx_prev + 1, idx_next))
+                    if sub and any(anchors[k] > ts_next or anchors[k] < ts_prev for k in sub):
+                        for k in sub:
+                            if orig_next > orig_prev:
+                                r = max(0.0, min(1.0, (blocks[k].movie_start - orig_prev) / (orig_next - orig_prev)))
+                                anchors[k] = round(ts_prev + r * (ts_next - ts_prev), 2)
+                            else:
+                                f = (k - idx_prev) / (idx_next - idx_prev)
+                                anchors[k] = round(ts_prev + f * (ts_next - ts_prev), 2)
+                        for k in sub:
+                            anchors[k] = max(anchors[k], anchors[k - 1])
+                            anchors[k] = min(anchors[k], ts_next)
+
+                # Reconcile segment after last strong anchor
+                last_strong_idx = strong_indices[-1]
+                last_strong_ts = anchors[last_strong_idx]
+                for k in range(last_strong_idx + 1, len(anchors)):
+                    anchors[k] = max(anchors[k], anchors[k - 1], last_strong_ts)
 
         # Apply anchors back to SceneBlocks
         for b_idx, block in enumerate(blocks):
@@ -2363,12 +2547,22 @@ STRICT GROUNDING RULES:
             "was", "are", "this", "that", "with", "for", "from", "not",
             "but", "so", "if", "its", "into", "up", "out", "now", "then",
             "were", "have", "has", "had", "would", "could", "will", "do",
+            # Contraction stems & conversational fillers (Phase 6E.2 hardening)
+            "don", "didn", "doesn", "wasn", "weren", "haven", "hasn", "hadn",
+            "won", "wouldn", "couldn", "shouldn", "isn", "aren", "ain",
+            "ve", "re", "ll", "d", "m", "kind", "sort",
         }
 
         def tokenize(text: str) -> set:
             if not text:
                 return set()
             norm = unicodedata.normalize("NFKC", str(text))
+            norm = re.sub(r"n't\b", " not", norm)
+            norm = re.sub(r"'re\b", " are", norm)
+            norm = re.sub(r"'ve\b", " have", norm)
+            norm = re.sub(r"'ll\b", " will", norm)
+            norm = re.sub(r"'d\b", " would", norm)
+            norm = re.sub(r"'m\b", " am", norm)
             tokens = re.findall(r"\w{2,}", norm.lower(), flags=re.UNICODE)
             return {t for t in tokens if t not in STOP_WORDS and not t.isdigit()}
 
