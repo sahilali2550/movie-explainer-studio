@@ -8,9 +8,11 @@ import requests
 import unicodedata
 import urllib.request
 from dataclasses import dataclass
-from typing import Dict, List, Tuple, Optional, Any, Union
+from typing import Dict, List, Tuple, Optional, Any, Union, Callable
 from deep_translator import GoogleTranslator, MyMemoryTranslator
 from app.core.config import SUPPORTED_LANGUAGES, STORY_PERSONAS
+
+MAX_CHRONOLOGY_RETRIES: int = 1
 
 
 @dataclass
@@ -41,6 +43,9 @@ class SceneBlock:
     evidence_ref: Optional[str] = None # Phase 3B evidence packet reference (e.g. "EP-001")
     story_step: Optional[int] = None   # Phase 3B story plan step number
     transcript_source: str = "none"    # Phase 6A: Source of dialogue cues ("existing_subtitles", "user_transcript", "asr", "none")
+    source_timestamp: Optional[float] = None # Phase 6G.3: Authoritative source movie timestamp (from DialogueRefProvenance / EvidencePacket)
+    chronology_valid: bool = True       # Phase 6G.3: True if scene sequence preserves source-grounded order
+    chronology_error: Optional[str] = None # Phase 6G.3: Diagnostic error if chronology violated
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -60,6 +65,9 @@ class SceneBlock:
             "evidence_ref": self.evidence_ref,
             "story_step": self.story_step,
             "transcript_source": self.transcript_source,
+            "source_timestamp": self.source_timestamp,
+            "chronology_valid": self.chronology_valid,
+            "chronology_error": self.chronology_error,
         }
 
 
@@ -2063,6 +2071,286 @@ STRICT GROUNDING RULES:
         return res.is_source_bound
 
     @staticmethod
+    def validate_storyboard_chronology(
+        blocks: List[Any],
+        dialogue_timeline: Optional[List[Dict[str, Any]]] = None,
+        evidence_packets: Optional[List[Any]] = None,
+        story_plan: Optional[List[Any]] = None
+    ) -> Tuple[bool, str, Dict[str, Any]]:
+        """
+        Phase 6G.3: Deterministic Storyboard Chronology Validation.
+        Enforces that consecutive FINAL STORYBOARD scenes that both have an authoritative
+        source timestamp must be non-decreasing: current_source_ts >= previous_source_ts.
+
+        Contract & Invariants:
+        1. Equal source timestamps are allowed (scenes covering the same scene/cue).
+        2. Unknown/unresolved source timestamps (None) are allowed and skipped (CONTRACT 5).
+        3. Arbitrary nominal [SCENE: MM:SS - MM:SS] timestamps are NEVER used as source chronology (CONTRACT 4).
+        4. Authoritative source timestamps come from:
+           - block.source_timestamp (if explicitly provided)
+           - DialogueRefProvenance (when dialogue_ref is source-bound)
+           - EvidencePacket (when evidence_ref is matched)
+           - StoryPlan item (when story_step is matched)
+        5. Does NOT reorder scenes; only accepts or rejects/flags candidates (CONTRACT 6).
+        """
+        if not blocks:
+            return True, "No storyboard scenes to validate.", {"is_valid": True, "violations": []}
+
+        packet_map = {}
+        if evidence_packets:
+            for p in evidence_packets:
+                p_id = p.get("packet_id") if isinstance(p, dict) else getattr(p, "packet_id", None)
+                if p_id:
+                    packet_map[p_id] = p
+
+        step_map = {}
+        if story_plan:
+            for s in story_plan:
+                s_step = s.get("step") if isinstance(s, dict) else getattr(s, "step", None)
+                if s_step is not None:
+                    step_map[s_step] = s
+
+        prev_ts: Optional[float] = None
+        prev_idx: Optional[int] = None
+        violations = []
+
+        for idx, b in enumerate(blocks):
+            # 1. Direct authoritative source_timestamp attribute / dict key
+            b_ts = getattr(b, "source_timestamp", None) if hasattr(b, "source_timestamp") else b.get("source_timestamp")
+
+            # 2. Derive from dialogue_ref provenance if not explicitly set
+            b_ref = getattr(b, "dialogue_ref", None) if hasattr(b, "dialogue_ref") else b.get("dialogue_ref")
+            if b_ts is None and b_ref:
+                prov = ScriptEngine.validate_dialogue_ref_provenance(
+                    dialogue_ref=b_ref,
+                    evidence_packets=evidence_packets,
+                    dialogue_timeline=dialogue_timeline
+                )
+                if prov.is_source_bound and prov.source_timestamp is not None:
+                    b_ts = float(prov.source_timestamp)
+
+            # 3. Derive from evidence_ref via evidence_packets if not set
+            b_ev_ref = getattr(b, "evidence_ref", None) if hasattr(b, "evidence_ref") else b.get("evidence_ref")
+            if b_ts is None and b_ev_ref and b_ev_ref in packet_map:
+                pkt = packet_map[b_ev_ref]
+                pkt_start = pkt.get("movie_start") if isinstance(pkt, dict) else getattr(pkt, "movie_start", None)
+                if pkt_start is not None:
+                    b_ts = float(pkt_start)
+
+            # 4. Derive from story_step via story_plan if not set
+            b_step = getattr(b, "story_step", None) if hasattr(b, "story_step") else b.get("story_step")
+            if b_ts is None and b_step is not None and b_step in step_map:
+                sp_item = step_map[b_step]
+                sp_ts = sp_item.get("source_timestamp") if isinstance(sp_item, dict) else getattr(sp_item, "source_timestamp", None)
+                if sp_ts is not None:
+                    b_ts = float(sp_ts)
+
+            # CONTRACT 5: Scenes without authoritative source grounding are skipped
+            if b_ts is None:
+                continue
+
+            b_ts = float(b_ts)
+
+            if prev_ts is not None and b_ts < prev_ts:
+                v_entry = {
+                    "scene_index": idx + 1,
+                    "previous_scene_index": prev_idx + 1,
+                    "current_source_timestamp": b_ts,
+                    "previous_source_timestamp": prev_ts,
+                    "dialogue_ref": b_ref,
+                    "evidence_ref": b_ev_ref
+                }
+                violations.append(v_entry)
+                err_msg = (
+                    f"Chronology violation: previous scene (index {prev_idx + 1}) source_timestamp={prev_ts:.2f}, "
+                    f"current scene (index {idx + 1}) source_timestamp={b_ts:.2f}, "
+                    f"scene_index={idx + 1}, dialogue_ref={repr(b_ref) if b_ref else 'None'}. "
+                    f"Source-grounded evidence order must be non-decreasing."
+                )
+                details = {
+                    "is_valid": False,
+                    "error": "chronology_violation",
+                    "failure_type": "source_grounded_chronology_inversion",
+                    "scene_index": idx + 1,
+                    "previous_scene_index": prev_idx + 1,
+                    "current_source_timestamp": b_ts,
+                    "previous_source_timestamp": prev_ts,
+                    "dialogue_ref": b_ref,
+                    "evidence_ref": b_ev_ref,
+                    "violations": violations
+                }
+                return False, err_msg, details
+
+            prev_ts = b_ts
+            prev_idx = idx
+
+        return True, "Storyboard chronology validated successfully.", {
+            "is_valid": True,
+            "failure_type": None,
+            "violations": []
+        }
+
+    MAX_CHRONOLOGY_RETRIES: int = 1
+
+    @staticmethod
+    def build_chronology_repair_prompt(
+        current_script: str,
+        chronology_details: Dict[str, Any],
+        story_plan: Optional[List[Any]] = None,
+        evidence_packets: Optional[List[Any]] = None,
+        target_lang: str = "en"
+    ) -> str:
+        """
+        Phase 6G.4: Builds a targeted, diagnostic chronology-repair prompt for exactly one regeneration attempt.
+        Informs the LLM of the precise source timestamps and inverted scene index, with strict repair constraints.
+        """
+        prev_ts = float(chronology_details.get("previous_source_timestamp", 0.0))
+        curr_ts = float(chronology_details.get("current_source_timestamp", 0.0))
+        sc_idx = chronology_details.get("scene_index", "?")
+        prev_idx = chronology_details.get("previous_scene_index", "?")
+        d_ref = chronology_details.get("dialogue_ref")
+        ev_ref = chronology_details.get("evidence_ref")
+
+        inversion_info = (
+            f"- Scene {prev_idx} authoritative source timestamp: {prev_ts:.2f}s\n"
+            f"- Scene {sc_idx} authoritative source timestamp: {curr_ts:.2f}s (delta: {curr_ts - prev_ts:.2f}s)\n"
+            f"- Inverted Scene Index: {sc_idx}\n"
+            f"- Dialogue Reference: {repr(d_ref) if d_ref else 'None'}\n"
+            f"- Evidence Reference: {repr(ev_ref) if ev_ref else 'None'}"
+        )
+
+        plan_str = ""
+        if story_plan:
+            plan_str = f"\nAUTHORITATIVE STORY PLAN SEQUENCE TO PRESERVE:\n{ScriptEngine.format_story_plan_for_prompt(story_plan)}\n"
+
+        prompt = f"""CHRONOLOGICAL ORDER REPAIR REQUIRED:
+The previously generated storyboard violates authoritative source chronology.
+Specifically, a later source-grounded event was placed before an earlier source-grounded event.
+
+DETECTED INVERSION:
+{inversion_info}
+{plan_str}
+STRICT REPAIR INSTRUCTIONS:
+1. Preserve the supplied StoryPlan sequence.
+2. Do not move a later source-grounded event before an earlier source-grounded event.
+3. Do not reverse source chronology.
+4. Do not invent or rewrite dialogue references.
+5. Preserve narrative content, dramatic style, and wording as much as possible.
+6. Do not solve the problem by deleting scenes.
+7. Do not solve the problem by changing nominal scene timestamps.
+8. The final storyboard scene order must preserve the relative order of authoritative source-grounded evidence.
+
+--- CURRENT SCRIPT TO REPAIR ---
+{current_script}
+--- END CURRENT SCRIPT ---
+
+Emit the complete repaired storyboard with corrected scene ordering that respects source chronological order."""
+        return prompt
+
+    @staticmethod
+    def generate_script_with_chronology_guard(
+        generate_fn: Callable[[str], Optional[str]],
+        initial_prompt: str,
+        duration_mins: int,
+        voice_speed: str,
+        target_lang: str,
+        source_video_duration_sec: float,
+        dialogue_timeline: Optional[List[Dict[str, Any]]] = None,
+        evidence_packets: Optional[List[Any]] = None,
+        story_plan: Optional[List[Any]] = None,
+        expand_fn: Optional[Callable[[str, int], Optional[str]]] = None
+    ) -> Tuple[Optional[str], bool, str, int, Optional[Dict[str, Any]]]:
+        """
+        Phase 6G.4: Controlled Single-Turn Chronology Failure Handling.
+        Executes initial generation (Attempt 1). If a deterministic
+        SOURCE-GROUNDED CHRONOLOGY INVERSION is detected, executes exactly
+        one targeted repair regeneration (Attempt 2, MAX_CHRONOLOGY_RETRIES = 1).
+
+        Returns:
+            (script_text, is_valid, integrity_report, attempts, chronology_details)
+        """
+        attempts = 1
+        raw_text = generate_fn(initial_prompt)
+        if not raw_text or len(raw_text.strip()) <= 80:
+            return None, False, "Generation attempt returned insufficient content.", attempts, None
+
+        text = ScriptEngine.strip_code_and_developer_artifacts(raw_text)
+
+        if expand_fn:
+            clean_test, _, _ = ScriptEngine.parse_storyboard(text)
+            actual_words = len(clean_test.split())
+            expanded = expand_fn(text, actual_words)
+            if expanded and len(expanded.split()) > actual_words:
+                text = ScriptEngine.strip_code_and_developer_artifacts(expanded.strip())
+
+        text = ScriptEngine.clamp_script_word_budget(
+            text.strip(),
+            target_duration_mins=duration_mins,
+            target_lang=target_lang,
+            voice_speed=voice_speed
+        )
+
+        is_valid, val_report, val_details = ScriptEngine.validate_script_integrity(
+            script_text=text,
+            source_duration_sec=source_video_duration_sec,
+            target_duration_mins=duration_mins,
+            target_lang=target_lang,
+            voice_speed=voice_speed,
+            dialogue_timeline=dialogue_timeline,
+            evidence_packets=evidence_packets,
+            story_plan=story_plan,
+            return_details=True
+        )
+
+        if is_valid:
+            return text, True, val_report, attempts, val_details
+
+        failure_type = val_details.get("failure_type") if val_details else None
+
+        # Only trigger retry for deterministic SOURCE-GROUNDED CHRONOLOGY INVERSION
+        if failure_type == "source_grounded_chronology_inversion" and attempts <= MAX_CHRONOLOGY_RETRIES:
+            attempts += 1
+            repair_prompt = ScriptEngine.build_chronology_repair_prompt(
+                current_script=text,
+                chronology_details=val_details,
+                story_plan=story_plan,
+                evidence_packets=evidence_packets,
+                target_lang=target_lang
+            )
+
+            retry_raw = generate_fn(repair_prompt)
+            if retry_raw and len(retry_raw.strip()) > 80:
+                retry_text = ScriptEngine.strip_code_and_developer_artifacts(retry_raw)
+                retry_text = ScriptEngine.clamp_script_word_budget(
+                    retry_text.strip(),
+                    target_duration_mins=duration_mins,
+                    target_lang=target_lang,
+                    voice_speed=voice_speed
+                )
+                is_valid_r, val_report_r, val_details_r = ScriptEngine.validate_script_integrity(
+                    script_text=retry_text,
+                    source_duration_sec=source_video_duration_sec,
+                    target_duration_mins=duration_mins,
+                    target_lang=target_lang,
+                    voice_speed=voice_speed,
+                    dialogue_timeline=dialogue_timeline,
+                    evidence_packets=evidence_packets,
+                    story_plan=story_plan,
+                    return_details=True
+                )
+                if is_valid_r:
+                    return retry_text, True, val_report_r, attempts, val_details_r
+                else:
+                    err_msg = f"Generated storyboard violates source chronology after one controlled repair attempt: {val_report_r}"
+                    return retry_text, False, err_msg, attempts, val_details_r
+            else:
+                err_msg = "Generated storyboard violates source chronology after one controlled repair attempt: (repair attempt returned empty)"
+                return text, False, err_msg, attempts, val_details
+
+        return text, False, val_report, attempts, val_details
+
+
+    @staticmethod
     def get_configured_embedding_provider() -> Optional[EmbeddingProvider]:
         """
         Factory to instantiate the production embedding provider if configured and enabled (Phase 5B).
@@ -2246,6 +2534,7 @@ STRICT GROUNDING RULES:
                     should_validate = enforce_source_provenance if enforce_source_provenance is not None else (
                         (dialogue_timeline is not None) or (evidence_packets is not None)
                     )
+                    source_timestamp = None
                     if should_validate:
                         if dialogue_ref:
                             prov = ScriptEngine.validate_dialogue_ref_provenance(
@@ -2256,6 +2545,7 @@ STRICT GROUNDING RULES:
                             if prov.is_source_bound:
                                 dialogue_ref = prov.dialogue_ref
                                 evidence_ref = prov.evidence_ref
+                                source_timestamp = prov.source_timestamp
                             else:
                                 dialogue_ref = None
                         else:
@@ -2267,7 +2557,8 @@ STRICT GROUNDING RULES:
                         narration_text=cleaned,
                         word_count=w_count,
                         dialogue_ref=dialogue_ref,
-                        evidence_ref=evidence_ref
+                        evidence_ref=evidence_ref,
+                        source_timestamp=source_timestamp
                     ))
 
         if not blocks:
@@ -2317,13 +2608,28 @@ STRICT GROUNDING RULES:
                         word_count=max(1, wc)
                     ))
 
-        # T-03: Auto-anchor to real dialogue timestamps when timeline is provided
+        # Phase 6G.3: Storyboard Source Chronology Validation Gate
         if dialogue_timeline:
-            blocks = ScriptEngine.anchor_scenes_to_dialogue(
-                blocks,
-                dialogue_timeline,
-                embedding_provider=embedding_provider
+            is_chron_valid, chron_report, chron_details = ScriptEngine.validate_storyboard_chronology(
+                blocks=blocks,
+                dialogue_timeline=dialogue_timeline,
+                evidence_packets=evidence_packets,
+                story_plan=story_plan
             )
+            if not is_chron_valid:
+                # Halt visual anchoring: DO NOT proceed into anchor_scenes_to_dialogue()
+                for b in blocks:
+                    b.chronology_valid = False
+                    b.chronology_error = chron_report
+                    b.is_authoritative = False
+                print(f"[Chronology Gate Blocked] {chron_report}")
+            else:
+                # Chronology valid -> proceed with visual anchoring
+                blocks = ScriptEngine.anchor_scenes_to_dialogue(
+                    blocks,
+                    dialogue_timeline,
+                    embedding_provider=embedding_provider
+                )
 
         # Phase 3B/6F: Link story_plan and evidence_ref to SceneBlocks if provided
         if story_plan and blocks:
@@ -3520,17 +3826,24 @@ STRICT GROUNDING RULES:
         source_duration_sec: float = 0,
         target_duration_mins: int = 10,
         target_lang: str = "en",
-        voice_speed: str = "fast"
-    ) -> Tuple[bool, str]:
+        voice_speed: str = "fast",
+        dialogue_timeline: Optional[List[Dict[str, Any]]] = None,
+        evidence_packets: Optional[List[Any]] = None,
+        story_plan: Optional[List[Any]] = None,
+        return_details: bool = False
+    ) -> Union[Tuple[bool, str], Tuple[bool, str, Dict[str, Any]]]:
         """
         Universal Automated Quality Gatekeeper.
         Verifies:
         1. Timeline Coverage: Last scene timestamp covers >= 85% of source video timeline.
         2. Word Budget Drift: Actual words are within acceptable range (not severely under-budget).
         3. Structural Pillars: Valid scene format and narrative closure.
+        4. Phase 6G.3: Storyboard Source Chronology Gate (monotonic non-decreasing source evidence).
         """
         if not script_text or not script_text.strip():
-            return False, "Script is empty."
+            msg = "Script is empty."
+            details = {"is_valid": False, "error": "empty_script", "failure_type": "empty_script", "violations": []}
+            return (False, msg, details) if return_details else (False, msg)
 
         # 1. Timeline Coverage Check
         ts_matches = re.findall(r'(?:\[(?:SCENE:\s*)?|\b)(\d{1,2}):(\d{2})\s*-\s*(\d{1,2}):(\d{2})\]?', script_text)
@@ -3544,10 +3857,14 @@ STRICT GROUNDING RULES:
 
         if source_duration_sec and source_duration_sec > 120:
             if max_end_sec == 0:
-                return False, "Missing scene timestamps across narrative."
+                msg = "Missing scene timestamps across narrative."
+                details = {"is_valid": False, "error": "missing_timestamps", "failure_type": "missing_timestamps", "violations": []}
+                return (False, msg, details) if return_details else (False, msg)
             coverage_pct = max_end_sec / source_duration_sec
             if coverage_pct < 0.85:
-                return False, f"Timeline coverage insufficient (covers {coverage_pct*100:.1f}%, minimum required 85%). Missing ending/climax."
+                msg = f"Timeline coverage insufficient (covers {coverage_pct*100:.1f}%, minimum required 85%). Missing ending/climax."
+                details = {"is_valid": False, "error": "insufficient_coverage", "failure_type": "insufficient_coverage", "coverage_pct": coverage_pct, "violations": []}
+                return (False, msg, details) if return_details else (False, msg)
 
         # 2. Word Budget Check (Measured on clean spoken narration)
         clean_narr, _, _ = ScriptEngine.parse_storyboard(script_text)
@@ -3555,9 +3872,32 @@ STRICT GROUNDING RULES:
         target_words = ScriptEngine.calculate_target_words(target_duration_mins, voice_speed, target_lang)
         min_allowed = int(target_words * 0.55) if target_duration_mins >= 5 else int(target_words * 0.50)
         if spoken_words < min_allowed:
-            return False, f"Script is severely under-budget ({spoken_words} spoken words, minimum expected {min_allowed} for {target_duration_mins}m video)."
+            msg = f"Script is severely under-budget ({spoken_words} spoken words, minimum expected {min_allowed} for {target_duration_mins}m video)."
+            details = {"is_valid": False, "error": "under_budget", "failure_type": "under_budget", "spoken_words": spoken_words, "min_allowed": min_allowed, "violations": []}
+            return (False, msg, details) if return_details else (False, msg)
 
-        return True, "Script passed all universal integrity gates."
+        # 3. Phase 6G.3: Storyboard Source Chronology Gate
+        chron_details = {"is_valid": True, "violations": [], "failure_type": None}
+        if (dialogue_timeline and len(dialogue_timeline) > 0) or (evidence_packets and len(evidence_packets) > 0):
+            val_blocks = ScriptEngine.parse_storyboard_blocks(
+                raw_script=script_text,
+                dialogue_timeline=dialogue_timeline,
+                evidence_packets=evidence_packets,
+                story_plan=story_plan,
+                enforce_source_provenance=True
+            )
+            is_chron_valid, chron_msg, chron_details = ScriptEngine.validate_storyboard_chronology(
+                blocks=val_blocks,
+                dialogue_timeline=dialogue_timeline,
+                evidence_packets=evidence_packets,
+                story_plan=story_plan
+            )
+            if not is_chron_valid:
+                res_msg = f"Script failed chronology gate: {chron_msg}"
+                return (False, res_msg, chron_details) if return_details else (False, res_msg)
+
+        res_msg = "Script passed all universal integrity gates."
+        return (True, res_msg, chron_details) if return_details else (True, res_msg)
 
     @staticmethod
     def build_prompt_for_genre(
@@ -3927,51 +4267,48 @@ Separate each part strictly with '===PART===' on its own line."""
                 lang_info = SUPPORTED_LANGUAGES.get(target_lang, SUPPORTED_LANGUAGES["en"])
                 system_instruction = f"You are an elite, world-class viral YouTube movie & drama narrator and storyboard director in natural colloquial {lang_info['name']}."
                 gpt_model = cfg_oa.get("model", "gpt-4o")
-                gpt_text = call_chatgpt_llm(
-                    prompt=prompt,
-                    system_prompt=system_instruction,
-                    model=gpt_model,
-                    max_tokens=4000,
-                    api_key=oa_key
-                )
-                if gpt_text and len(gpt_text.strip()) > 80:
-                    gpt_text = ScriptEngine.strip_code_and_developer_artifacts(gpt_text)
-                    clean_test_oa, _, _ = ScriptEngine.parse_storyboard(gpt_text)
-                    actual_words_oa = len(clean_test_oa.split())
 
-                    # Auto-Expansion if under budget
-                    if duration_mins >= 3 and actual_words_oa < int(target_words * 0.80):
-                        exp_prompt = f"""The following {lang_info['name']} script is only {actual_words_oa} words, but the video duration requires AT LEAST {target_words} words:
+                def oa_gen(p_str: str) -> Optional[str]:
+                    return call_chatgpt_llm(
+                        prompt=p_str,
+                        system_prompt=system_instruction,
+                        model=gpt_model,
+                        max_tokens=4000,
+                        api_key=oa_key
+                    )
+
+                def oa_expand(s_str: str, actual_w: int) -> Optional[str]:
+                    if duration_mins >= 3 and actual_w < int(target_words * 0.80):
+                        exp_prompt = f"""The following {lang_info['name']} script is only {actual_w} words, but the video duration requires AT LEAST {target_words} words:
 
 --- CURRENT SCRIPT ---
-{gpt_text}
+{s_str}
 --- END ---
 
 TASK: Elaborate, expand and enrich the story across Act 1, Act 2, and Act 3 with detailed character dialogues, dramatic internal monologues, intense scene descriptions, and escalating emotional stakes to reach {target_words} words. Return the complete, expanded narrative with milestone timestamp brackets like [01:15 - 02:30]."""
                         try:
-                            expanded_oa = call_chatgpt_llm(prompt=exp_prompt, system_prompt=system_instruction, model=gpt_model, max_tokens=4000, api_key=oa_key)
-                            if expanded_oa and len(expanded_oa.split()) > actual_words_oa:
-                                gpt_text = ScriptEngine.strip_code_and_developer_artifacts(expanded_oa.strip())
+                            return call_chatgpt_llm(prompt=exp_prompt, system_prompt=system_instruction, model=gpt_model, max_tokens=4000, api_key=oa_key)
                         except Exception:
-                            pass
+                            return None
+                    return None
 
-                    gpt_text = ScriptEngine.clamp_script_word_budget(
-                        gpt_text.strip(),
-                        target_duration_mins=duration_mins,
-                        target_lang=target_lang,
-                        voice_speed=voice_speed
-                    )
-                    is_valid, val_report = ScriptEngine.validate_script_integrity(
-                        script_text=gpt_text,
-                        source_duration_sec=source_video_duration_sec,
-                        target_duration_mins=duration_mins,
-                        target_lang=target_lang,
-                        voice_speed=voice_speed
-                    )
+                gpt_text, is_valid, val_report, attempts, val_details = ScriptEngine.generate_script_with_chronology_guard(
+                    generate_fn=oa_gen,
+                    initial_prompt=prompt,
+                    duration_mins=duration_mins,
+                    voice_speed=voice_speed,
+                    target_lang=target_lang,
+                    source_video_duration_sec=source_video_duration_sec,
+                    dialogue_timeline=dialogue_timeline,
+                    evidence_packets=evidence_packets,
+                    story_plan=story_plan,
+                    expand_fn=oa_expand if (duration_mins >= 3) else None
+                )
+                if gpt_text:
                     clean_narr_oa, _, _ = ScriptEngine.parse_storyboard(gpt_text)
                     spoken_word_count_oa = len(clean_narr_oa.split()) if clean_narr_oa else len(gpt_text.split())
                     hook_metrics = ScriptEngine.calculate_hook_score(gpt_text, target_lang)
-                    return {
+                    res = {
                         "success": True,
                         "model": f"openai:{gpt_model}",
                         "script": gpt_text.strip(),
@@ -3984,11 +4321,17 @@ TASK: Elaborate, expand and enrich the story across Act 1, Act 2, and Act 3 with
                         "story_beats": story_beats or [],
                         "is_valid": is_valid,
                         "integrity_report": val_report,
+                        "attempts": attempts,
                         "evidence_packets": [p.to_dict() if hasattr(p, "to_dict") else p for p in evidence_packets],
                         "story_plan": [s.to_dict() if hasattr(s, "to_dict") else s for s in story_plan],
                         "is_plan_valid": is_plan_valid,
                         "plan_validation_report": plan_validation_report
                     }
+                    if not is_valid and val_details and val_details.get("error") == "chronology_violation":
+                        res["failure_type"] = "chronology_violation"
+                        res["error"] = val_report
+                        res["chronology_details"] = val_details
+                    return res
         except Exception as e:
             print(f"[OpenAI ChatGPT Integration Notice] Fallback triggered: {e}")
 
@@ -3998,45 +4341,42 @@ TASK: Elaborate, expand and enrich the story across Act 1, Act 2, and Act 3 with
             if is_ninerouter_available(timeout_sec=8.0):
                 lang_info = SUPPORTED_LANGUAGES.get(target_lang, SUPPORTED_LANGUAGES["en"])
                 system_instruction = f"You are an elite, viral YouTube video narrator and storyboard writer in natural colloquial {lang_info['name']}."
-                nine_text = call_ninerouter_llm(prompt=prompt, system_prompt=system_instruction, timeout_sec=90, max_tokens=4000)
-                if nine_text and len(nine_text.strip()) > 80:
-                    nine_text = ScriptEngine.strip_code_and_developer_artifacts(nine_text)
-                    clean_test, _, _ = ScriptEngine.parse_storyboard(nine_text)
-                    actual_words = len(clean_test.split())
-                    
-                    # Auto-Expansion Loop: If returned script is under 80% of target for long videos (>=3 mins)
-                    if duration_mins >= 3 and actual_words < int(target_words * 0.80):
-                        exp_prompt = f"""The following {lang_info['name']} script is only {actual_words} words, but the video duration requires AT LEAST {target_words} words:
+
+                def nine_gen(p_str: str) -> Optional[str]:
+                    return call_ninerouter_llm(prompt=p_str, system_prompt=system_instruction, timeout_sec=90, max_tokens=4000)
+
+                def nine_expand(s_str: str, actual_w: int) -> Optional[str]:
+                    if duration_mins >= 3 and actual_w < int(target_words * 0.80):
+                        exp_prompt = f"""The following {lang_info['name']} script is only {actual_w} words, but the video duration requires AT LEAST {target_words} words:
 
 --- CURRENT SCRIPT ---
-{nine_text}
+{s_str}
 --- END ---
 
 TASK: Elaborate, expand and enrich the story across Act 1, Act 2, and Act 3 with detailed character dialogues, dramatic internal monologues, intense scene descriptions, and escalating emotional stakes to reach {target_words} words. Return the complete, expanded narrative with milestone timestamp brackets like [01:15 - 02:30]."""
                         try:
-                            expanded_text = call_ninerouter_llm(prompt=exp_prompt, system_prompt=system_instruction, timeout_sec=90, max_tokens=4000)
-                            if expanded_text and len(expanded_text.split()) > actual_words:
-                                nine_text = ScriptEngine.strip_code_and_developer_artifacts(expanded_text.strip())
+                            return call_ninerouter_llm(prompt=exp_prompt, system_prompt=system_instruction, timeout_sec=90, max_tokens=4000)
                         except Exception:
-                            pass
+                            return None
+                    return None
 
-                    nine_text = ScriptEngine.clamp_script_word_budget(
-                        nine_text.strip(),
-                        target_duration_mins=duration_mins,
-                        target_lang=target_lang,
-                        voice_speed=voice_speed
-                    )
-                    is_valid, val_report = ScriptEngine.validate_script_integrity(
-                        script_text=nine_text,
-                        source_duration_sec=source_video_duration_sec,
-                        target_duration_mins=duration_mins,
-                        target_lang=target_lang,
-                        voice_speed=voice_speed
-                    )
+                nine_text, is_valid, val_report, attempts, val_details = ScriptEngine.generate_script_with_chronology_guard(
+                    generate_fn=nine_gen,
+                    initial_prompt=prompt,
+                    duration_mins=duration_mins,
+                    voice_speed=voice_speed,
+                    target_lang=target_lang,
+                    source_video_duration_sec=source_video_duration_sec,
+                    dialogue_timeline=dialogue_timeline,
+                    evidence_packets=evidence_packets,
+                    story_plan=story_plan,
+                    expand_fn=nine_expand if (duration_mins >= 3) else None
+                )
+                if nine_text:
                     clean_narr, _, _ = ScriptEngine.parse_storyboard(nine_text)
                     spoken_word_count = len(clean_narr.split()) if clean_narr else len(nine_text.split())
                     hook_metrics = ScriptEngine.calculate_hook_score(nine_text, target_lang)
-                    return {
+                    res = {
                         "success": True,
                         "model": "9router:new-combo",
                         "script": nine_text.strip(),
@@ -4049,76 +4389,86 @@ TASK: Elaborate, expand and enrich the story across Act 1, Act 2, and Act 3 with
                         "story_beats": story_beats or [],
                         "is_valid": is_valid,
                         "integrity_report": val_report,
+                        "attempts": attempts,
                         "evidence_packets": [p.to_dict() if hasattr(p, "to_dict") else p for p in evidence_packets],
                         "story_plan": [s.to_dict() if hasattr(s, "to_dict") else s for s in story_plan],
                         "is_plan_valid": is_plan_valid,
                         "plan_validation_report": plan_validation_report
                     }
+                    if not is_valid and val_details and val_details.get("error") == "chronology_violation":
+                        res["failure_type"] = "chronology_violation"
+                        res["error"] = val_report
+                        res["chronology_details"] = val_details
+                    return res
         except Exception as e:
             print(f"[9Router Integration Warning] {e}")
 
         # 2. Attempt generation via Gemini API if key is available
         if api_key:
             for model in ["gemini-2.0-flash", "gemini-1.5-flash", "gemini-2.5-flash"]:
-                url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}"
-                payload = json.dumps({"contents": [{"parts": [{"text": prompt}]}]}).encode("utf-8")
-                req = urllib.request.Request(url, data=payload, headers={"Content-Type": "application/json"})
-                try:
+                def gemini_gen(p_str: str) -> Optional[str]:
+                    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}"
+                    payload = json.dumps({"contents": [{"parts": [{"text": p_str}]}]}).encode("utf-8")
+                    req = urllib.request.Request(url, data=payload, headers={"Content-Type": "application/json"})
                     with urllib.request.urlopen(req, timeout=35) as resp:
-                        res = json.loads(resp.read().decode("utf-8"))
-                        text = res["candidates"][0]["content"]["parts"][0]["text"].strip()
-                        if text:
-                            text = ScriptEngine.strip_code_and_developer_artifacts(text)
-                            clean_test_g, _, _ = ScriptEngine.parse_storyboard(text)
-                            actual_words_g = len(clean_test_g.split())
+                        res_json = json.loads(resp.read().decode("utf-8"))
+                        return res_json["candidates"][0]["content"]["parts"][0]["text"].strip()
 
-                            # Auto-Expansion Loop for Gemini: If returned script is under 80% of target for long videos (>=3 mins)
-                            if duration_mins >= 3 and actual_words_g < int(target_words * 0.80):
-                                exp_res = ScriptEngine.expand_script(
-                                    current_script=text,
-                                    target_lang=target_lang,
-                                    duration_mins=duration_mins,
-                                    voice_speed=voice_speed,
-                                    genre=genre,
-                                    gemini_api_key=api_key
-                                )
-                                if exp_res.get("success") and exp_res.get("script") and len(exp_res["script"].split()) > actual_words_g:
-                                    text = exp_res["script"]
+                def gemini_expand(s_str: str, actual_w: int) -> Optional[str]:
+                    if duration_mins >= 3 and actual_w < int(target_words * 0.80):
+                        exp_res = ScriptEngine.expand_script(
+                            current_script=s_str,
+                            target_lang=target_lang,
+                            duration_mins=duration_mins,
+                            voice_speed=voice_speed,
+                            genre=genre,
+                            gemini_api_key=api_key
+                        )
+                        if exp_res.get("success") and exp_res.get("script"):
+                            return exp_res["script"]
+                    return None
 
-                            text = ScriptEngine.clamp_script_word_budget(
-                                text.strip(),
-                                target_duration_mins=duration_mins,
-                                target_lang=target_lang,
-                                voice_speed=voice_speed
-                            )
-                            is_valid, val_report = ScriptEngine.validate_script_integrity(
-                                script_text=text,
-                                source_duration_sec=source_video_duration_sec,
-                                target_duration_mins=duration_mins,
-                                target_lang=target_lang,
-                                voice_speed=voice_speed
-                            )
-                            clean_narr_g, _, _ = ScriptEngine.parse_storyboard(text)
-                            spoken_word_count_g = len(clean_narr_g.split()) if clean_narr_g else len(text.split())
-                            hook_metrics = ScriptEngine.calculate_hook_score(text, target_lang)
-                            return {
-                                "success": True,
-                                "model": model,
-                                "script": text,
-                                "language": target_lang,
-                                "genre": genre,
-                                "target_words": target_words,
-                                "actual_words": spoken_word_count_g,
-                                "raw_words": len(text.split()),
-                                "hook_score": hook_metrics,
-                                "story_beats": story_beats or [],
-                                "is_valid": is_valid,
-                                "integrity_report": val_report,
-                                "evidence_packets": [p.to_dict() if hasattr(p, "to_dict") else p for p in evidence_packets],
-                                "story_plan": [s.to_dict() if hasattr(s, "to_dict") else s for s in story_plan],
-                                "is_plan_valid": is_plan_valid,
-                                "plan_validation_report": plan_validation_report
-                            }
+                try:
+                    text, is_valid, val_report, attempts, val_details = ScriptEngine.generate_script_with_chronology_guard(
+                        generate_fn=gemini_gen,
+                        initial_prompt=prompt,
+                        duration_mins=duration_mins,
+                        voice_speed=voice_speed,
+                        target_lang=target_lang,
+                        source_video_duration_sec=source_video_duration_sec,
+                        dialogue_timeline=dialogue_timeline,
+                        evidence_packets=evidence_packets,
+                        story_plan=story_plan,
+                        expand_fn=gemini_expand if (duration_mins >= 3) else None
+                    )
+                    if text:
+                        clean_narr_g, _, _ = ScriptEngine.parse_storyboard(text)
+                        spoken_word_count_g = len(clean_narr_g.split()) if clean_narr_g else len(text.split())
+                        hook_metrics = ScriptEngine.calculate_hook_score(text, target_lang)
+                        res = {
+                            "success": True,
+                            "model": model,
+                            "script": text,
+                            "language": target_lang,
+                            "genre": genre,
+                            "target_words": target_words,
+                            "actual_words": spoken_word_count_g,
+                            "raw_words": len(text.split()),
+                            "hook_score": hook_metrics,
+                            "story_beats": story_beats or [],
+                            "is_valid": is_valid,
+                            "integrity_report": val_report,
+                            "attempts": attempts,
+                            "evidence_packets": [p.to_dict() if hasattr(p, "to_dict") else p for p in evidence_packets],
+                            "story_plan": [s.to_dict() if hasattr(s, "to_dict") else s for s in story_plan],
+                            "is_plan_valid": is_plan_valid,
+                            "plan_validation_report": plan_validation_report
+                        }
+                        if not is_valid and val_details and val_details.get("error") == "chronology_violation":
+                            res["failure_type"] = "chronology_violation"
+                            res["error"] = val_report
+                            res["chronology_details"] = val_details
+                        return res
                 except Exception:
                     continue
 
@@ -4134,6 +4484,9 @@ TASK: Elaborate, expand and enrich the story across Act 1, Act 2, and Act 3 with
             "target_words": target_words,
             "hook_score": hook_metrics,
             "story_beats": story_beats or [],
+            "is_valid": True,
+            "integrity_report": "Local fallback template generated.",
+            "attempts": 1,
             "evidence_packets": [p.to_dict() if hasattr(p, "to_dict") else p for p in evidence_packets],
             "story_plan": [s.to_dict() if hasattr(s, "to_dict") else s for s in story_plan],
             "is_plan_valid": is_plan_valid,
