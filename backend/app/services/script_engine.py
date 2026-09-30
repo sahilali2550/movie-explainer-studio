@@ -1,5 +1,6 @@
 import os
 import re
+import abc
 import json
 import math
 import time
@@ -10,6 +11,7 @@ import hashlib
 import difflib
 import requests
 import unicodedata
+import subprocess
 import urllib.request
 from dataclasses import dataclass
 from typing import Dict, List, Tuple, Optional, Any, Union, Callable
@@ -50,6 +52,11 @@ class SceneBlock:
     source_timestamp: Optional[float] = None # Phase 6G.3: Authoritative source movie timestamp (from DialogueRefProvenance / EvidencePacket)
     chronology_valid: bool = True       # Phase 6G.3: True if scene sequence preserves source-grounded order
     chronology_error: Optional[str] = None # Phase 6G.3: Diagnostic error if chronology violated
+    visual_score: Optional[float] = None   # Phase 7A: Visual semantic match score [0.0, 1.0]
+    visual_confidence: str = "VISUAL_UNAVAILABLE" # Phase 7A: "VISUAL_CONFIDENT", "VISUAL_WEAK", "VISUAL_UNAVAILABLE"
+    visual_provider: Optional[str] = None  # Phase 7A: Name/ID of visual semantic provider
+    visual_candidate_count: int = 0        # Phase 7A: Number of visual candidates evaluated
+    visual_selection_reason: Optional[str] = None # Phase 7A: Rationale for candidate selection
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -72,6 +79,11 @@ class SceneBlock:
             "source_timestamp": self.source_timestamp,
             "chronology_valid": self.chronology_valid,
             "chronology_error": self.chronology_error,
+            "visual_score": self.visual_score,
+            "visual_confidence": self.visual_confidence,
+            "visual_provider": self.visual_provider,
+            "visual_candidate_count": self.visual_candidate_count,
+            "visual_selection_reason": self.visual_selection_reason,
         }
 
 
@@ -469,6 +481,240 @@ class SemanticEmbeddingCache:
 
 
 _GLOBAL_EMBEDDING_CACHE = SemanticEmbeddingCache(max_size=5000)
+
+
+# =============================================================================
+# PHASE 7A: VISUAL SEMANTIC SCENE SELECTION & RERANKING ABSTRACTION
+# =============================================================================
+
+def _validate_visual_vector(vec: Any, expected_dim: Optional[int] = None) -> Optional[List[float]]:
+    """Defensively validates that a visual or text embedding vector is a valid non-empty list of finite floats."""
+    if not isinstance(vec, (list, tuple)) or len(vec) == 0:
+        return None
+    if expected_dim is not None and len(vec) != expected_dim:
+        return None
+    clean: List[float] = []
+    for x in vec:
+        if not isinstance(x, (int, float)) or not math.isfinite(x):
+            return None
+        clean.append(float(x))
+    return clean
+
+
+class VisualSemanticProvider(abc.ABC):
+    """
+    Abstract Base Class for visual-semantic providers (Phase 7A).
+    Computes text-image semantic relevance for shot candidate reranking.
+    Decoupled from specific backends (OpenAI vision, 9Router multimodal, local CLIP/SigLIP, or test mock).
+    """
+    provider_id: str = "generic_visual"
+    model_id: str = "default"
+    expected_dim: Optional[int] = None
+
+    @property
+    def namespace(self) -> str:
+        dim_str = f":{self.expected_dim}" if self.expected_dim is not None else ""
+        return f"{self.provider_id}:{self.model_id}{dim_str}"
+
+    @abc.abstractmethod
+    def encode_text(self, text: str) -> Optional[List[float]]:
+        """Encodes text into a normalized semantic vector. Returns None on error."""
+        raise NotImplementedError
+
+    @abc.abstractmethod
+    def encode_image(self, image_path: str) -> Optional[List[float]]:
+        """Encodes an image frame into a normalized semantic vector. Returns None on error."""
+        raise NotImplementedError
+
+    @abc.abstractmethod
+    def similarity(self, text_or_vec: Any, image_or_vec: Any) -> float:
+        """Computes cosine similarity or semantic alignment between text and image in [-1.0, 1.0]."""
+        raise NotImplementedError
+
+    @abc.abstractmethod
+    def score_frame(self, image_path: str, query: str) -> float:
+        """Computes direct relevance score of an image frame against a text query in [0.0, 1.0]."""
+        raise NotImplementedError
+
+    def validate_vector(self, vec: Any) -> Optional[List[float]]:
+        return _validate_visual_vector(vec, self.expected_dim)
+
+
+class DictVisualSemanticProvider(VisualSemanticProvider):
+    """
+    Deterministic dictionary-backed visual provider for hermetic testing (Phase 7A).
+    Supports explicit direct relevance scores, or vector cosine similarity.
+    """
+    def __init__(
+        self,
+        text_embeddings: Optional[Dict[str, List[float]]] = None,
+        image_embeddings: Optional[Dict[str, List[float]]] = None,
+        direct_scores: Optional[Dict[Tuple[str, str], float]] = None,
+        provider_name: str = "mock_visual",
+        model_name: str = "mock_model",
+        dim: Optional[int] = None
+    ):
+        self.text_embeddings = text_embeddings or {}
+        self.image_embeddings = image_embeddings or {}
+        self.direct_scores = direct_scores or {}
+        self.provider_id = provider_name
+        self.model_id = model_name
+        self.expected_dim = dim
+
+    def encode_text(self, text: str) -> Optional[List[float]]:
+        vec = self.text_embeddings.get(text)
+        return self.validate_vector(vec) if vec is not None else None
+
+    def encode_image(self, image_path: str) -> Optional[List[float]]:
+        # Match by full path or basename
+        vec = self.image_embeddings.get(image_path)
+        if vec is None:
+            vec = self.image_embeddings.get(os.path.basename(image_path))
+        return self.validate_vector(vec) if vec is not None else None
+
+    def similarity(self, text_or_vec: Any, image_or_vec: Any) -> float:
+        v_t = text_or_vec if isinstance(text_or_vec, list) else self.encode_text(str(text_or_vec))
+        v_i = image_or_vec if isinstance(image_or_vec, list) else self.encode_image(str(image_or_vec))
+        if v_t is None or v_i is None:
+            return 0.0
+        return cosine_similarity(v_t, v_i)
+
+    def score_frame(self, image_path: str, query: str) -> float:
+        # 1. Direct score lookup (full path or basename)
+        pair = (image_path, query)
+        if pair in self.direct_scores:
+            sc = self.direct_scores[pair]
+            return max(0.0, min(1.0, float(sc))) if math.isfinite(sc) else 0.0
+
+        b_name = os.path.basename(image_path) if image_path else ""
+        pair_b = (b_name, query)
+        if pair_b in self.direct_scores:
+            sc = self.direct_scores[pair_b]
+            return max(0.0, min(1.0, float(sc))) if math.isfinite(sc) else 0.0
+
+        # 2. Embedding similarity fallback
+        sim = self.similarity(query, image_path)
+        return max(0.0, min(1.0, (sim + 1.0) / 2.0 if sim != 0.0 else 0.0))
+
+
+class OpenAICompatibleMultimodalVisualProvider(VisualSemanticProvider):
+    """
+    Production-grade multimodal visual provider utilizing OpenAI-compatible /chat/completions vision endpoints (Phase 7A).
+    Compatible with OpenAI (GPT-4o, GPT-4o-mini), 9Router multimodal combos, Ollama vision (llava/minicpm-v), or custom proxies.
+    Encodes representative frames to base64 and prompts the vision model for bounded relevance scoring [0.0, 1.0].
+    """
+    def __init__(
+        self,
+        base_url: str = "https://api.openai.com/v1",
+        api_key: str = "",
+        model_name: str = "gpt-4o-mini",
+        timeout: float = 12.0,
+        provider_name: str = "openai_vision"
+    ):
+        self.base_url = (base_url or "https://api.openai.com/v1").rstrip("/")
+        self.api_key = (api_key or "").strip()
+        self.model_name = (model_name or "gpt-4o-mini").strip()
+        self.timeout = max(1.0, float(timeout))
+        self.provider_id = (provider_name or "openai_vision").strip()
+        self.model_id = self.model_name
+        base = self.base_url
+        self.endpoint = f"{base}/chat/completions" if not base.endswith("/chat/completions") else base
+
+    def encode_text(self, text: str) -> Optional[List[float]]:
+        return None
+
+    def encode_image(self, image_path: str) -> Optional[List[float]]:
+        return None
+
+    def similarity(self, text_or_vec: Any, image_or_vec: Any) -> float:
+        return 0.0
+
+    def score_frame(self, image_path: str, query: str) -> float:
+        if not image_path or not os.path.exists(image_path) or not query:
+            return 0.0
+        try:
+            import base64
+            with open(image_path, "rb") as f:
+                b64_data = base64.b64encode(f.read()).decode("utf-8")
+            headers = {"Content-Type": "application/json"}
+            if self.api_key:
+                headers["Authorization"] = f"Bearer {self.api_key}"
+            prompt = (
+                f"Rate how well this video frame matches the following scene event/narration on a scale from 0.0 to 1.0.\n"
+                f"Scene: {query}\n"
+                f"Respond ONLY with a JSON object: {{\"score\": <float between 0.0 and 1.0>}}"
+            )
+            payload = {
+                "model": self.model_name,
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": prompt},
+                            {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64_data}"}}
+                        ]
+                    }
+                ],
+                "max_tokens": 50,
+                "temperature": 0.0
+            }
+            res = requests.post(self.endpoint, json=payload, headers=headers, timeout=self.timeout)
+            if res.status_code == 200:
+                data = res.json()
+                text_resp = data.get("choices", [{}])[0].get("message", {}).get("content", "")
+                m = re.search(r'["\']?score["\']?\s*:\s*([0-9\.]+)', text_resp)
+                if m:
+                    val = float(m.group(1))
+                    if math.isfinite(val):
+                        return max(0.0, min(1.0, val))
+            return 0.0
+        except Exception as e:
+            print(f"[VisualProvider Notice] Frame scoring failed: {type(e).__name__} ({self.provider_id})")
+            return 0.0
+
+
+class VisualEmbeddingCache:
+    """
+    Bounded in-memory cache for visual embeddings and frame relevance scores (Phase 7A).
+    Keys on SHA-256 of namespace (provider:model:dim) and identifier to guarantee cache isolation.
+    """
+    def __init__(self, max_size: int = 2000):
+        self.max_size = max(1, max_size)
+        self._cache: Dict[str, Any] = {}
+        self._order: List[str] = []
+
+    def _key(self, identifier: str, namespace: str = "") -> str:
+        norm_id = (identifier or "").strip()
+        norm_ns = (namespace or "").strip()
+        raw = f"{norm_ns}::{norm_id}" if norm_ns else norm_id
+        return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+    def get(self, identifier: str, namespace: str = "") -> Optional[Any]:
+        k = self._key(identifier, namespace=namespace)
+        return self._cache.get(k)
+
+    def put(self, identifier: str, val: Any, namespace: str = "") -> None:
+        if val is None:
+            return
+        k = self._key(identifier, namespace=namespace)
+        if k in self._cache:
+            self._cache[k] = val
+            return
+        if len(self._cache) >= self.max_size and self._order:
+            oldest = self._order.pop(0)
+            self._cache.pop(oldest, None)
+        self._cache[k] = val
+        self._order.append(k)
+
+    def clear(self) -> None:
+        self._cache.clear()
+        self._order.clear()
+
+    def __len__(self) -> int:
+        return len(self._cache)
+
+
+_GLOBAL_VISUAL_CACHE = VisualEmbeddingCache(max_size=2000)
 
 
 class ScriptEngine:
@@ -2898,6 +3144,64 @@ Emit the complete repaired storyboard with corrected scene ordering that respect
             return None
 
     @staticmethod
+    def get_configured_visual_provider() -> Optional["VisualSemanticProvider"]:
+        """
+        Phase 7A: Resolves and instantiates the configured visual-semantic provider.
+        Checks environment variables:
+          - VISUAL_RERANKING_ENABLED ("1", "true")
+          - VISUAL_PROVIDER ("openai_vision", "9router", "custom")
+          - VISUAL_BASE_URL
+          - VISUAL_API_KEY
+          - VISUAL_MODEL
+        Returns VisualSemanticProvider if enabled and configured, else None (safe fallback).
+        """
+        env_enabled = os.environ.get("VISUAL_RERANKING_ENABLED", "").strip().lower()
+        if env_enabled not in ("1", "true", "yes", "on"):
+            return None
+
+        from app.services.ai_router import load_ai_settings
+        ai_cfg = {}
+        try:
+            ai_cfg = load_ai_settings()
+        except Exception:
+            pass
+
+        active_prov = os.environ.get("VISUAL_PROVIDER", "").strip() or ai_cfg.get("active_provider", "openai")
+        prov_details = ai_cfg.get("providers", {}).get(active_prov, {})
+
+        base_url = os.environ.get("VISUAL_BASE_URL", "").strip()
+        if not base_url:
+            if active_prov == "openai":
+                base_url = "https://api.openai.com/v1"
+            else:
+                base_url = prov_details.get("url", "http://127.0.0.1:20128/v1")
+
+        api_key = os.environ.get("VISUAL_API_KEY", "").strip()
+        if not api_key:
+            if active_prov == "openai":
+                api_key = os.environ.get("OPENAI_API_KEY", "").strip() or prov_details.get("key", "").strip()
+            else:
+                api_key = prov_details.get("key", "").strip()
+
+        model_name = os.environ.get("VISUAL_MODEL", "").strip()
+        if not model_name:
+            model_name = prov_details.get("vision_model", "gpt-4o-mini").strip()
+
+        timeout = float(os.environ.get("VISUAL_TIMEOUT", "12.0"))
+
+        try:
+            return OpenAICompatibleMultimodalVisualProvider(
+                base_url=base_url,
+                api_key=api_key,
+                model_name=model_name,
+                timeout=timeout,
+                provider_name=active_prov
+            )
+        except Exception as e:
+            print(f"[VisualProvider Notice] Failed to initialize configured visual provider: {e}")
+            return None
+
+    @staticmethod
     def parse_storyboard_blocks(
         raw_script: str,
         dialogue_timeline: Optional[List[Dict[str, Any]]] = None,
@@ -2905,7 +3209,9 @@ Emit the complete repaired storyboard with corrected scene ordering that respect
         transcript_source: Optional[str] = None,
         evidence_packets: Optional[List[Any]] = None,
         story_plan: Optional[List[Any]] = None,
-        enforce_source_provenance: Optional[bool] = None
+        enforce_source_provenance: Optional[bool] = None,
+        visual_provider: Optional[Any] = None,
+        video_path: Optional[str] = None
     ) -> List[SceneBlock]:
         """
         Parses structured SceneBlock objects pairing each scene timestamp cut [SCENE: MM:SS - MM:SS]
@@ -3114,6 +3420,17 @@ Emit the complete repaired storyboard with corrected scene ordering that respect
 
         for b in blocks:
             b.transcript_source = resolved_source
+
+        # Phase 7A: Visual semantic reranking (optional / isolated)
+        if visual_provider is not None:
+            blocks = ScriptEngine.rerank_scene_blocks_visually(
+                blocks=blocks,
+                video_path=video_path,
+                dialogue_timeline=dialogue_timeline,
+                visual_provider=visual_provider,
+                story_plan=story_plan,
+                evidence_packets=evidence_packets
+            )
 
         return blocks
 
@@ -3650,6 +3967,372 @@ Emit the complete repaired storyboard with corrected scene ordering that respect
             new_end = round(new_start + clamped_span, 2)
             block.movie_start = round(new_start, 2)
             block.movie_end = new_end
+
+        return blocks
+
+    @staticmethod
+    def build_visual_query(
+        block: "SceneBlock",
+        story_plan: Optional[List[Any]] = None,
+        evidence_packets: Optional[List[Any]] = None
+    ) -> str:
+        """
+        Phase 7A: Builds a clean visual query for frame-relevance scoring.
+        Strips structural tags ([SCENE], [VOICEOVER], [DIALOGUE_REF], markdown headings)
+        and incorporates story-plan core events / narrative purpose when available.
+        """
+        raw_text = block.narration_text or ""
+        clean_narr = ScriptEngine.strip_production_tags(raw_text)
+
+        # Remove any residual markup like [SCENE: ...], [DIALOGUE_REF: ...]
+        clean_narr = re.sub(r'\[(?:SCENE|DIALOGUE_REF|VOICEOVER|STEP|ACT|EP)[\w\s\:\-\.\,]*\]', '', clean_narr, flags=re.IGNORECASE)
+        clean_narr = re.sub(r'#+\s*', '', clean_narr)
+        clean_narr = re.sub(r'\s+', ' ', clean_narr).strip()
+
+        event_prefix = ""
+        # Check matching story plan item
+        if story_plan and (block.story_step or block.evidence_ref):
+            matched_step = None
+            for item in story_plan:
+                s_step = item.get("step") if isinstance(item, dict) else getattr(item, "step", None)
+                e_ref = item.get("evidence_ref") if isinstance(item, dict) else getattr(item, "evidence_ref", None)
+                if block.story_step is not None and s_step == block.story_step:
+                    matched_step = item
+                    break
+                if block.evidence_ref and e_ref == block.evidence_ref:
+                    matched_step = item
+                    break
+            if matched_step:
+                core_ev = matched_step.get("core_event") if isinstance(matched_step, dict) else getattr(matched_step, "core_event", "")
+                if core_ev and core_ev.lower() not in clean_narr.lower():
+                    event_prefix = f"{core_ev}. "
+
+        query = f"{event_prefix}{clean_narr}".strip()
+        return query or clean_narr or raw_text.strip()
+
+    @staticmethod
+    def generate_visual_candidates(
+        block: "SceneBlock",
+        dialogue_timeline: Optional[List[Dict[str, Any]]] = None,
+        video_duration: float = 0.0,
+        search_window_radius: float = 30.0,
+        max_candidates: int = 5,
+        video_path: Optional[str] = None
+    ) -> List[Dict[str, Any]]:
+        """
+        Phase 7A: Bounded candidate window generation around existing grounded timestamps.
+        Collects:
+          1. Current anchor window [movie_start, movie_end] (always candidate 0)
+          2. Nearby dialogue cues within [movie_start - radius, movie_start + radius]
+          3. Shot boundaries from detect_camera_cuts_in_window (if video_path provided)
+          4. Silent segments (dialogue gaps >= 3.0s)
+        Deduplicates candidate starts within 1.5s proximity and caps to max_candidates.
+        """
+        anchor_s = float(block.movie_start)
+        span = max(5.0, float(block.movie_end) - anchor_s)
+        max_dur = video_duration if video_duration > 0.0 else 999999.0
+
+        candidates: List[Dict[str, Any]] = [
+            {
+                "start": round(anchor_s, 2),
+                "end": round(min(max_dur, anchor_s + span), 2),
+                "source": "anchor",
+                "is_anchor": True,
+                "grounding_score": 1.0
+            }
+        ]
+
+        min_w = max(0.0, anchor_s - search_window_radius)
+        max_w = min(max_dur, anchor_s + search_window_radius)
+
+        raw_cands: List[Tuple[float, str, float]] = []
+
+        # 1. Nearby dialogue cues
+        if dialogue_timeline:
+            for cue in dialogue_timeline:
+                c_s = float(cue.get("start", 0.0))
+                if min_w <= c_s <= max_w:
+                    dist = abs(c_s - anchor_s)
+                    g_score = max(0.2, 1.0 - (dist / search_window_radius) * 0.5)
+                    raw_cands.append((c_s, "nearby_dialogue", g_score))
+
+        # 2. Shot boundaries (bounded FFmpeg scdet)
+        if video_path and os.path.exists(video_path):
+            try:
+                from app.services.video_engine import VideoEngine
+                cuts = VideoEngine.detect_camera_cuts_in_window(video_path, min_w, max_w, threshold=12.0)
+                for cut_s, _ in cuts:
+                    if min_w <= cut_s <= max_w and abs(cut_s - anchor_s) > 1.0:
+                        raw_cands.append((cut_s, "shot_boundary", 0.5))
+            except Exception:
+                pass
+
+        # 3. Silent segments (dialogue-free gaps >= 3.0s)
+        if dialogue_timeline and len(dialogue_timeline) > 1:
+            sorted_cues = sorted(dialogue_timeline, key=lambda c: float(c.get("start", 0.0)))
+            for i in range(len(sorted_cues) - 1):
+                gap_start = float(sorted_cues[i].get("end", 0.0))
+                gap_end = float(sorted_cues[i + 1].get("start", 0.0))
+                if gap_end - gap_start >= 3.0:
+                    eff_start = max(min_w, gap_start)
+                    eff_end = min(max_w, gap_end)
+                    if eff_end > eff_start:
+                        mid_gap = round((eff_start + eff_end) / 2.0, 2)
+                        if abs(mid_gap - anchor_s) > 1.0:
+                            raw_cands.append((mid_gap, "silent_segment", 0.4))
+                        # Sample candidate offsets outward from anchor that fall inside the silent gap
+                        for off in [10.0, -10.0, 20.0, -20.0, 30.0, -30.0]:
+                            cand_t = round(anchor_s + off, 2)
+                            if eff_start <= cand_t <= eff_end and abs(cand_t - anchor_s) > 1.0:
+                                raw_cands.append((cand_t, "silent_segment", 0.4))
+
+        # Sort raw candidates by distance to anchor
+        raw_cands.sort(key=lambda x: abs(x[0] - anchor_s))
+
+        # Deduplicate and add up to max_candidates
+        for c_ts, c_src, g_sc in raw_cands:
+            if len(candidates) >= max_candidates:
+                break
+            if any(abs(c_ts - c["start"]) < 1.5 for c in candidates):
+                continue
+            candidates.append({
+                "start": round(c_ts, 2),
+                "end": round(min(max_dur, c_ts + span), 2),
+                "source": c_src,
+                "is_anchor": False,
+                "grounding_score": round(g_sc, 2)
+            })
+
+        return candidates
+
+    @staticmethod
+    def compute_visual_bonus(
+        visual_score: float,
+        max_bonus: float = 1.0,
+        weight: float = 1.0,
+        confident_threshold: float = 0.65
+    ) -> float:
+        """
+        Phase 7A: Bounded composite visual bonus formula.
+        Returns visual_score * weight capped at max_bonus if visual_score >= confident_threshold.
+        Otherwise returns 0.0 to prevent weak visual noise from disturbing grounding.
+        """
+        if not math.isfinite(visual_score) or visual_score < confident_threshold:
+            return 0.0
+        bonus = float(visual_score) * weight
+        return round(min(max_bonus, max(0.0, bonus)), 4)
+
+    @staticmethod
+    def rerank_scene_blocks_visually(
+        blocks: List["SceneBlock"],
+        video_path: Optional[str] = None,
+        dialogue_timeline: Optional[List[Dict[str, Any]]] = None,
+        visual_provider: Optional["VisualSemanticProvider"] = None,
+        story_plan: Optional[List[Any]] = None,
+        evidence_packets: Optional[List[Any]] = None,
+        mock_frame_resolver: Optional[Callable[[float], str]] = None,
+        temp_dir: Optional[str] = None,
+        search_window_radius: float = 25.0,
+        max_candidates: int = 5,
+        confident_threshold: float = 0.65,
+        min_separation: float = 0.15
+    ) -> List["SceneBlock"]:
+        """
+        Phase 7A: Visual Semantic Scene Selection & Reranking Engine.
+        Evaluates visual relevance of representative frames for bounded candidate windows
+        around grounded scene anchors, reranking only when visual confidence is high and
+        strictly preserving verified dialogue reference anchors, chronology, and audio lock.
+        """
+        if not blocks:
+            return []
+
+        # Safe fallback: If no visual provider is configured, preserve existing anchors immediately
+        if visual_provider is None:
+            for b in blocks:
+                b.visual_confidence = "VISUAL_UNAVAILABLE"
+                b.visual_score = None
+                b.visual_candidate_count = 0
+                b.visual_selection_reason = "provider_unavailable"
+            return blocks
+
+        prov_id = getattr(visual_provider, "provider_id", "unknown_visual")
+        prov_ns = getattr(visual_provider, "namespace", prov_id)
+
+        # Video duration inspection
+        v_dur = 0.0
+        if video_path and os.path.exists(video_path):
+            try:
+                from app.services.video_engine import VideoEngine
+                v_dur = VideoEngine.get_duration(video_path)
+            except Exception:
+                v_dur = 0.0
+
+        def extract_frame_at(ts: float) -> Optional[str]:
+            if mock_frame_resolver is not None:
+                return mock_frame_resolver(ts)
+            if not video_path or not os.path.exists(video_path):
+                return None
+            from app.core.config import get_ffmpeg_binary, TEMP_DIR
+            out_dir = temp_dir or str(TEMP_DIR)
+            os.makedirs(out_dir, exist_ok=True)
+            frame_path = os.path.join(out_dir, f"vis_cand_{int(ts * 100):08d}.jpg")
+            if os.path.exists(frame_path) and os.path.getsize(frame_path) > 1000:
+                return frame_path
+            ffmpeg_bin = get_ffmpeg_binary()
+            cmd = [
+                ffmpeg_bin, "-y",
+                "-ss", str(round(ts, 2)),
+                "-i", video_path,
+                "-vframes", "1",
+                "-q:v", "2",
+                frame_path
+            ]
+            try:
+                res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=10)
+                if os.path.exists(frame_path) and os.path.getsize(frame_path) > 1000:
+                    return frame_path
+            except Exception as e:
+                print(f"[VisualReranker Warning] Frame extraction failed at {ts}s: {type(e).__name__} ({e})")
+            return None
+
+        prev_anchor = 0.0
+
+        for b_idx, block in enumerate(blocks):
+            try:
+                query = ScriptEngine.build_visual_query(block, story_plan, evidence_packets)
+                d_ref = (getattr(block, "dialogue_ref", "") or "").strip()
+
+                # Phase 6E / 7A: Protection of Strong Exact Dialogue Anchors
+                # If a block has a substantive, source-bound dialogue reference verified in the transcript,
+                # visual evidence MUST NOT override it with an unrelated candidate.
+                has_strong_dialogue_ref = bool(
+                    d_ref and len(d_ref) >= 8 and dialogue_timeline and any(
+                        d_ref.lower() in (c.get("text", "") or "").lower() or
+                        (c.get("text", "") or "").lower() in d_ref.lower()
+                        for c in dialogue_timeline
+                    )
+                )
+
+                if has_strong_dialogue_ref:
+                    # Dialogue reference protected: evaluate visual score for observability only
+                    anchor_frame = extract_frame_at(block.movie_start)
+                    v_score = 0.0
+                    if anchor_frame:
+                        cached_sc = _GLOBAL_VISUAL_CACHE.get(anchor_frame, namespace=prov_ns)
+                        if cached_sc is not None:
+                            v_score = float(cached_sc)
+                        else:
+                            v_score = visual_provider.score_frame(anchor_frame, query)
+                            _GLOBAL_VISUAL_CACHE.put(anchor_frame, v_score, namespace=prov_ns)
+
+                    block.visual_score = round(v_score, 4) if v_score > 0.0 else None
+                    block.visual_confidence = "VISUAL_CONFIDENT" if v_score >= confident_threshold else "VISUAL_WEAK"
+                    block.visual_provider = prov_id
+                    block.visual_candidate_count = 1
+                    block.visual_selection_reason = "dialogue_ref_protected"
+                    prev_anchor = block.movie_start
+                    continue
+
+                # Weak / ambiguous / silent scene: generate candidates
+                candidates = ScriptEngine.generate_visual_candidates(
+                    block=block,
+                    dialogue_timeline=dialogue_timeline,
+                    video_duration=v_dur,
+                    search_window_radius=search_window_radius,
+                    max_candidates=max_candidates,
+                    video_path=video_path
+                )
+
+                scored_candidates: List[Dict[str, Any]] = []
+                anchor_vis_score = 0.0
+
+                for cand in candidates:
+                    ts = cand["start"]
+                    frame = extract_frame_at(ts)
+                    v_sc = 0.0
+                    if frame:
+                        cached = _GLOBAL_VISUAL_CACHE.get(frame, namespace=prov_ns)
+                        if cached is not None:
+                            v_sc = float(cached)
+                        else:
+                            v_sc = visual_provider.score_frame(frame, query)
+                            _GLOBAL_VISUAL_CACHE.put(frame, v_sc, namespace=prov_ns)
+
+                    if cand.get("is_anchor"):
+                        anchor_vis_score = v_sc
+
+                    v_bonus = ScriptEngine.compute_visual_bonus(
+                        v_sc,
+                        max_bonus=1.0,
+                        weight=1.0,
+                        confident_threshold=confident_threshold
+                    )
+                    composite_sc = round(cand.get("grounding_score", 0.0) + v_bonus, 4)
+                    scored_candidates.append({
+                        **cand,
+                        "frame": frame,
+                        "visual_score": v_sc,
+                        "visual_bonus": v_bonus,
+                        "composite_score": composite_sc
+                    })
+
+                # If no frames could be extracted/resolved at all, visual scoring is unavailable
+                frames_available = any(c.get("frame") is not None for c in scored_candidates)
+                if not frames_available:
+                    block.visual_confidence = "VISUAL_UNAVAILABLE"
+                    block.visual_score = None
+                    block.visual_candidate_count = len(candidates)
+                    block.visual_selection_reason = "frames_unavailable"
+                    prev_anchor = block.movie_start
+                    continue
+
+                # Chronological filtering: candidate must not regress before previous scene's anchor
+                valid_candidates = [c for c in scored_candidates if c["start"] >= prev_anchor]
+                if not valid_candidates:
+                    valid_candidates = [scored_candidates[0]] # fallback to current anchor
+
+                # Select candidate with highest composite score (breaking ties with anchor priority)
+                best_cand = max(
+                    valid_candidates,
+                    key=lambda c: (c["composite_score"], c.get("visual_score", 0.0), 1.0 if c.get("is_anchor") else 0.0)
+                )
+
+                best_vis = best_cand.get("visual_score", 0.0)
+                is_improvement = (
+                    not best_cand.get("is_anchor")
+                    and best_vis >= confident_threshold
+                    and (best_vis - anchor_vis_score) >= min_separation
+                )
+
+                if is_improvement:
+                    new_s = best_cand["start"]
+                    span = max(5.0, block.movie_end - block.movie_start)
+                    block.movie_start = round(new_s, 2)
+                    block.movie_end = round(new_s + span, 2)
+                    block.visual_confidence = "VISUAL_CONFIDENT"
+                    block.visual_selection_reason = "visual_rerank_improved"
+                else:
+                    block.visual_confidence = "VISUAL_CONFIDENT" if anchor_vis_score >= confident_threshold else "VISUAL_WEAK"
+                    block.visual_selection_reason = "anchor_preserved"
+
+                block.visual_score = round(best_vis, 4) if best_vis > 0.0 else None
+                block.visual_provider = prov_id
+                block.visual_candidate_count = len(candidates)
+                prev_anchor = block.movie_start
+
+            except Exception as e:
+                # Security Rule 8: Graceful fallback on unexpected error during visual evaluation
+                print(f"[VisualReranker Warning] Block {b_idx} visual evaluation failed: {type(e).__name__} ({prov_id})")
+                block.visual_confidence = "VISUAL_UNAVAILABLE"
+                block.visual_score = None
+                block.visual_candidate_count = 0
+                block.visual_selection_reason = "error_fallback"
+                prev_anchor = block.movie_start
+
+        # Monotonicity check across all blocks
+        for i in range(1, len(blocks)):
+            if blocks[i].movie_start < blocks[i - 1].movie_start:
+                blocks[i].movie_start = blocks[i - 1].movie_start
 
         return blocks
 

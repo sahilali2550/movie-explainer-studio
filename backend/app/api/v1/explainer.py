@@ -666,11 +666,14 @@ async def render_video_endpoint(
 
         clean_narration, scene_ranges, scene_subs = ScriptEngine.parse_storyboard(script_text)
         embedding_prov = ScriptEngine.get_configured_embedding_provider()
+        visual_prov = ScriptEngine.get_configured_visual_provider()
         scene_blocks = ScriptEngine.parse_storyboard_blocks(
             script_text,
             dialogue_timeline=dialogue_timeline,
             embedding_provider=embedding_prov,
-            transcript_source=transcript_source
+            transcript_source=transcript_source,
+            visual_provider=visual_prov,
+            video_path=raw_video_path if (raw_video_path and os.path.exists(raw_video_path)) else None,
         )
         if scene_blocks:
             scene_ranges = [(b.movie_start, b.movie_end) for b in scene_blocks]
@@ -740,6 +743,16 @@ async def render_video_endpoint(
             raise HTTPException(status_code=400, detail="Must provide either a YouTube URL or a video file.")
 
         raw_dur = VideoEngine.get_duration(raw_video_path) if (raw_video_path and os.path.exists(raw_video_path)) else 0.0
+
+        if visual_prov and raw_video_path and os.path.exists(raw_video_path):
+            if any(getattr(b, "visual_confidence", "") == "VISUAL_UNAVAILABLE" for b in scene_blocks):
+                log_event("👁️ Applying visual semantic scene reranking with retrieved source video...", "INFO")
+                scene_blocks = ScriptEngine.rerank_scene_blocks_visually(
+                    blocks=scene_blocks,
+                    visual_provider=visual_prov,
+                    video_path=raw_video_path,
+                    dialogue_timeline=dialogue_timeline,
+                )
 
         # 4. Slice & Assemble Video — Audio-Locked (each clip duration == narration window)
         video_slice_path = str(TEMP_DIR / f"{job_id}_slice.mp4")
@@ -1057,10 +1070,13 @@ async def render_batch_endpoint(
             base_duration = VideoEngine.get_duration(base_speech_path) if os.path.exists(base_speech_path) else 60.0
             base_speech_cues = VoiceEngine.get_speech_cues(base_speech_path)
             embedding_prov = ScriptEngine.get_configured_embedding_provider()
+            visual_prov = ScriptEngine.get_configured_visual_provider()
             base_scene_blocks = ScriptEngine.parse_storyboard_blocks(
                 base_script,
                 dialogue_timeline=dialogue_timeline,
-                embedding_provider=embedding_prov
+                embedding_provider=embedding_prov,
+                visual_provider=visual_prov,
+                video_path=raw_video_path if (raw_video_path and os.path.exists(raw_video_path)) else None,
             )
             if base_scene_blocks:
                 base_scene_blocks = ScriptEngine.assign_narration_timing(base_scene_blocks, base_duration, base_speech_cues)
@@ -1256,10 +1272,13 @@ async def render_batch_endpoint(
                     speech_dur = VideoEngine.get_duration(speech_path)
                     speech_cues = VoiceEngine.get_speech_cues(speech_path)
                     embedding_prov = ScriptEngine.get_configured_embedding_provider()
+                    visual_prov = ScriptEngine.get_configured_visual_provider()
                     loc_scene_blocks = ScriptEngine.parse_storyboard_blocks(
                         localized_script,
                         dialogue_timeline=dialogue_timeline,
-                        embedding_provider=embedding_prov
+                        embedding_provider=embedding_prov,
+                        visual_provider=visual_prov,
+                        video_path=raw_video_path if (raw_video_path and os.path.exists(raw_video_path)) else None,
                     )
                     if loc_scene_blocks:
                         loc_scene_blocks = ScriptEngine.assign_narration_timing(loc_scene_blocks, speech_dur, speech_cues)
@@ -1629,11 +1648,14 @@ async def run_autopilot_endpoint(
 
         clean_narration, scene_ranges, scene_subs = ScriptEngine.parse_storyboard(final_script)
         embedding_prov = ScriptEngine.get_configured_embedding_provider()
+        visual_prov = ScriptEngine.get_configured_visual_provider()
         scene_blocks = ScriptEngine.parse_storyboard_blocks(
             final_script,
             dialogue_timeline=dialogue_timeline,
             embedding_provider=embedding_prov,
-            transcript_source=transcript_source
+            transcript_source=transcript_source,
+            visual_provider=visual_prov,
+            video_path=raw_video_path if ('raw_video_path' in locals() and raw_video_path and os.path.exists(raw_video_path)) else None,
         )
         if scene_blocks:
             scene_ranges = [(b.movie_start, b.movie_end) for b in scene_blocks]
@@ -1683,6 +1705,16 @@ async def run_autopilot_endpoint(
             raise HTTPException(status_code=400, detail="Failed to retrieve or download source video.")
 
         raw_dur = VideoEngine.get_duration(raw_video_path) if (raw_video_path and os.path.exists(raw_video_path)) else 0.0
+
+        if visual_prov and raw_video_path and os.path.exists(raw_video_path):
+            if any(getattr(b, "visual_confidence", "") == "VISUAL_UNAVAILABLE" for b in scene_blocks):
+                log_event("👁️ [Autopilot] Applying visual semantic scene reranking with retrieved source video...", "INFO")
+                scene_blocks = ScriptEngine.rerank_scene_blocks_visually(
+                    blocks=scene_blocks,
+                    visual_provider=visual_prov,
+                    video_path=raw_video_path,
+                    dialogue_timeline=dialogue_timeline,
+                )
 
         # Step 5: Video Slicing & Assembly — Audio-Locked (deterministic narration-to-visual sync)
         video_slice_path = str(TEMP_DIR / f"{job_id}_sliced.mp4")
