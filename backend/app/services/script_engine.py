@@ -3109,6 +3109,9 @@ STRICT GROUNDING RULES:
         }
 
     MAX_CHRONOLOGY_RETRIES: int = 1
+    LONG_FORM_DURATION_THRESHOLD_MINS: int = 15
+    MAX_CHUNK_TARGET_WORDS: int = 1200
+    MAX_CHUNK_RETRIES: int = 1
 
     @staticmethod
     def build_chronology_repair_prompt(
@@ -3280,6 +3283,514 @@ Emit the complete repaired storyboard with corrected scene ordering that respect
                 return text, False, err_msg, attempts, val_details
 
         return text, False, val_report, attempts, val_details
+
+    # =========================================================================
+    # Phase 8A: Long-Form Explainer Support (>15m) via Bounded Chunk Generation
+    # =========================================================================
+
+    @staticmethod
+    def plan_long_form_chunks(
+        target_duration_mins: int,
+        voice_speed: str = "fast",
+        target_lang: str = "en",
+        source_duration_sec: float = 0,
+        dialogue_timeline: Optional[List[Dict[str, Any]]] = None,
+        evidence_packets: Optional[List[Any]] = None,
+        story_plan: Optional[List[Any]] = None,
+        max_chunk_words: int = 1200
+    ) -> List[Dict[str, Any]]:
+        """
+        Phase 8A: Bounded Chunk Planner for Long-Form Explainers (>15 mins).
+        Partitions requested duration into chronological narrative chunks mapped to Acts,
+        ensuring each chunk stays well within safe single-call LLM token budgets.
+        If an act exceeds max_chunk_words, it is deterministically subdivided.
+        """
+        total_target_words = ScriptEngine.calculate_target_words(
+            target_duration_mins, voice_speed, target_lang, anti_copyright_drift=True
+        )
+
+        milestones = ScriptEngine.partition_timeline(
+            source_duration_sec=source_duration_sec,
+            target_duration_mins=target_duration_mins,
+            dialogue_timeline=dialogue_timeline
+        )
+
+        act_weights = {
+            "Act 1": 0.20,
+            "Act 2A": 0.25,
+            "Act 2B": 0.25,
+            "Act 3": 0.20,
+            "Epilogue": 0.10
+        }
+
+        # Index evidence and plan items by act
+        act_evidence: Dict[str, List[Any]] = {m["act"]: [] for m in milestones}
+        act_plan: Dict[str, List[Any]] = {m["act"]: [] for m in milestones}
+
+        if evidence_packets:
+            for ep in evidence_packets:
+                a = ep.get("act", "Act 1") if isinstance(ep, dict) else getattr(ep, "act", "Act 1")
+                if a in act_evidence:
+                    act_evidence[a].append(ep)
+                else:
+                    act_evidence.setdefault("Act 1", []).append(ep)
+
+        if story_plan:
+            for sp in story_plan:
+                a = sp.get("act", "Act 1") if isinstance(sp, dict) else getattr(sp, "act", "Act 1")
+                if a in act_plan:
+                    act_plan[a].append(sp)
+                else:
+                    act_plan.setdefault("Act 1", []).append(sp)
+
+        raw_chunks: List[Dict[str, Any]] = []
+        for m in milestones:
+            act_name = m["act"]
+            weight = act_weights.get(act_name, 0.20)
+            act_words = max(80, int(round(total_target_words * weight)))
+            start_s = float(m["start_sec"])
+            end_s = float(m["end_sec"])
+            p_list = act_evidence.get(act_name, [])
+            sp_list = act_plan.get(act_name, [])
+
+            if act_words > max_chunk_words:
+                # Subdivide act deterministically into 2 halves
+                w1 = act_words // 2
+                w2 = act_words - w1
+                mid_s = round((start_s + end_s) / 2.0)
+
+                mid_split_idx_p = len(p_list) // 2
+                mid_split_idx_sp = len(sp_list) // 2
+
+                raw_chunks.append({
+                    "act": act_name,
+                    "label": f"{m['label']} (Part 1)",
+                    "start_sec": start_s,
+                    "end_sec": mid_s,
+                    "target_words": w1,
+                    "evidence_packets": p_list[:mid_split_idx_p],
+                    "story_plan_items": sp_list[:mid_split_idx_sp],
+                    "is_subdivided": True,
+                    "sub_part": 1
+                })
+                raw_chunks.append({
+                    "act": act_name,
+                    "label": f"{m['label']} (Part 2)",
+                    "start_sec": mid_s,
+                    "end_sec": end_s,
+                    "target_words": w2,
+                    "evidence_packets": p_list[mid_split_idx_p:],
+                    "story_plan_items": sp_list[mid_split_idx_sp:],
+                    "is_subdivided": True,
+                    "sub_part": 2
+                })
+            else:
+                raw_chunks.append({
+                    "act": act_name,
+                    "label": m["label"],
+                    "start_sec": start_s,
+                    "end_sec": end_s,
+                    "target_words": act_words,
+                    "evidence_packets": p_list,
+                    "story_plan_items": sp_list,
+                    "is_subdivided": False,
+                    "sub_part": 1
+                })
+
+        total_chunks = len(raw_chunks)
+        for idx, chunk in enumerate(raw_chunks):
+            chunk["chunk_index"] = idx
+            chunk["total_chunks"] = total_chunks
+            chunk["is_first_chunk"] = (idx == 0)
+            chunk["is_last_chunk"] = (idx == total_chunks - 1)
+
+            if idx == 0:
+                chunk["narrative_role"] = "opening_hook_and_setup"
+            elif idx == total_chunks - 1:
+                chunk["narrative_role"] = "climax_resolution_and_outro"
+            elif chunk["act"] in ("Act 3",):
+                chunk["narrative_role"] = "climax_confrontation"
+            else:
+                chunk["narrative_role"] = "rising_action_and_escalation"
+
+        return raw_chunks
+
+    @staticmethod
+    def build_chunk_prompt(
+        chunk: Dict[str, Any],
+        title: str,
+        description: str,
+        plot_summary: str,
+        genre: str,
+        persona: str,
+        mood: str,
+        spoiler_mode: str,
+        target_lang: str,
+        voice_speed: str,
+        previous_chunk_summary: Optional[Dict[str, Any]] = None
+    ) -> str:
+        """
+        Phase 8A: Builds a bounded chunk generation prompt.
+        Supplies only the chunk's allocated story section, word budget, and
+        the minimal previous ending context needed for seamless narrative continuity.
+        """
+        lang_info = SUPPORTED_LANGUAGES.get(target_lang, SUPPORTED_LANGUAGES["en"])
+        lang_name = lang_info["name"]
+
+        persona_map = {
+            "hollywood_trailer": "Epic, dramatic, cinematic, high-stakes with breathless pacing.",
+            "viral_fast": "Hyper-fast, punchy, high-energy, modern TikTok/Reels retention style.",
+            "sarcastic_roaster": "Witty, humorous, sarcastic commentary pointing out absurd plot choices.",
+            "documentary": "Serious, objective, chilling, investigative tone like true crime docuseries."
+        }
+        persona_guide = persona_map.get(persona, persona_map["hollywood_trailer"])
+
+        def sec_to_ts(s: float) -> str:
+            m = int(s // 60)
+            sec = int(s % 60)
+            return f"{m:02d}:{sec:02d}"
+
+        start_ts = sec_to_ts(chunk["start_sec"])
+        end_ts = sec_to_ts(chunk["end_sec"])
+        target_w = chunk["target_words"]
+        chunk_idx = chunk["chunk_index"] + 1
+        total_chunks = chunk["total_chunks"]
+
+        # Continuity section
+        if previous_chunk_summary:
+            last_ts = previous_chunk_summary.get("last_scene_timestamp", "")
+            last_ref = previous_chunk_summary.get("last_dialogue_ref", "")
+            last_vo = previous_chunk_summary.get("last_narration_snippet", "")
+            continuity_block = f"""=== PREVIOUS_SCENE_END_CONTEXT (CONTINUITY LOCK) ===
+The previous narrative section concluded with:
+- Previous Scene Timestamp: [{last_ts}]
+- Previous Dialogue Reference: {repr(last_ref)}
+- Ending Narration Context: "{last_vo}"
+
+STRICT CONTINUITY INSTRUCTIONS:
+1. DO NOT re-introduce characters or restart the movie premise.
+2. DO NOT repeat the previous scene, its events, or its dialogue.
+3. Pick up the story immediately from this point and advance forward chronologically.
+"""
+        else:
+            continuity_block = """=== OPENING NARRATIVE SECTION ===
+This is the beginning of the movie story explainer.
+- Hook the audience immediately in the opening seconds.
+- Establish the protagonist, world premise, and initial stakes.
+- DO NOT conclude the movie in this section.
+"""
+
+        # Role-specific ending instructions
+        if chunk.get("is_last_chunk"):
+            ending_rule = f"""MANDATORY CLOSING & SHORT REVIEW:
+- Deliver the ultimate climax resolution and character fates ({spoiler_mode}).
+- In the final 15-20 seconds, provide a punchy moral takeaway, short review, and call-to-action!"""
+        else:
+            ending_rule = """CONTINUITY GUARD:
+- DO NOT conclude the movie, summarize the ending, or give farewell call-to-actions in this section.
+- End on an active narrative beat so the next act can continue seamlessly."""
+
+        grounding_parts = []
+        if chunk.get("evidence_packets"):
+            packets_fmt = ScriptEngine.format_evidence_packets_for_prompt(chunk["evidence_packets"][:30])
+            grounding_parts.append(f"MANDATORY EVIDENCE PACKETS FOR THIS SECTION:\n{packets_fmt}")
+        if chunk.get("story_plan_items"):
+            plan_fmt = ScriptEngine.format_story_plan_for_prompt(chunk["story_plan_items"][:30])
+            grounding_parts.append(f"MANDATORY STORY PLAN FOR THIS SECTION:\n{plan_fmt}")
+
+        grounding_section = "\n\n".join(grounding_parts) if grounding_parts else "Progress through the narrative events in this section based on plot guide."
+
+        prompt = f"""You are an elite, viral YouTube video narrator and storyboard director in natural colloquial {lang_name} ({lang_info['native']}).
+Title: {title}
+Genre: {genre}
+Plot Guide / Synopsis: {plot_summary}
+Background Description: {description[:600]}
+
+YOU ARE WRITING SECTION {chunk_idx} OF {total_chunks}:
+- Act Section: {chunk['act']} - {chunk['label']}
+- Story Timeline Window: [{start_ts} - {end_ts}]
+- Target Spoken Narration Length: ~{target_w} spoken words (Pacing: {voice_speed})
+
+{continuity_block}
+{grounding_section}
+
+OBJECTIVES:
+1. Narrative Tone: {persona_guide} (Mood: {mood.upper()}).
+2. Focus strictly on narrating the events of [{start_ts} - {end_ts}].
+3. Spoken Word Quota: Write at least {max(50, int(target_w * 0.70))} spoken words under [VOICEOVER]. Do NOT summarize briefly.
+4. {ending_rule}
+5. STRICT ANTI-CODE RULE: Do NOT include code blocks, python scripts, unit tests, or markdown backticks under any circumstance. Output pure spoken storytelling narration.
+
+FORMATTING REQUIREMENTS:
+Every scene block in this section MUST strictly follow this exact structure:
+[SCENE: MM:SS - MM:SS]
+[DIALOGUE_REF: "exact quote from source evidence if dialogue is spoken"]
+[VOICEOVER]
+Your narrative text here...
+
+Begin writing Section {chunk_idx} now:"""
+        return prompt
+
+    @staticmethod
+    def generate_chunk_with_retry(
+        generate_fn: Callable[[str], Optional[str]],
+        chunk_prompt: str,
+        chunk: Dict[str, Any],
+        target_lang: str = "en",
+        max_retries: int = 1
+    ) -> Tuple[Optional[str], bool, str, int]:
+        """
+        Phase 8A: Generates a single storyboard chunk with bounded retry logic.
+        Validates: non-empty narration, valid SceneBlocks, chronological timestamps.
+        If validation fails, retries up to max_retries (default 1) before cleanly aborting.
+        """
+        attempts = 0
+        current_prompt = chunk_prompt
+        failure_reason = "unknown"
+
+        while attempts <= max_retries:
+            attempts += 1
+            raw_text = generate_fn(current_prompt)
+            if not raw_text or len(raw_text.strip()) <= 40:
+                failure_reason = "insufficient_content"
+            else:
+                text = ScriptEngine.strip_code_and_developer_artifacts(raw_text).strip()
+                spoken_words = ScriptEngine.get_spoken_word_count(text)
+                min_expected = max(15, min(40, int(chunk.get("target_words", 100) * 0.10)))
+
+                if spoken_words < min_expected:
+                    failure_reason = f"under_budget ({spoken_words} < {min_expected})"
+                else:
+                    blocks = ScriptEngine.parse_storyboard_blocks(text)
+                    if not blocks:
+                        failure_reason = "no_scene_blocks_parsed"
+                    else:
+                        # Check internal chunk chronology
+                        has_inversion = False
+                        for b_i in range(len(blocks) - 1):
+                            if blocks[b_i + 1].movie_start < blocks[b_i].movie_start - 5.0:
+                                has_inversion = True
+                                break
+                        if has_inversion:
+                            failure_reason = "internal_chunk_chronology_inversion"
+                        else:
+                            # Chunk validated successfully
+                            return text, True, "Chunk validated successfully.", attempts
+
+            if attempts <= max_retries:
+                current_prompt = (
+                    f"{chunk_prompt}\n\n"
+                    f"CRITICAL REPAIR REQUIRED (Attempt {attempts+1}):\n"
+                    f"Previous attempt failed validation ({failure_reason}).\n"
+                    f"Ensure you format every scene with [SCENE: MM:SS - MM:SS] and [VOICEOVER],\n"
+                    f"maintain strictly chronological timestamps, and output at least {int(chunk.get('target_words', 100) * 0.70)} spoken words.\n"
+                )
+
+        return None, False, f"Chunk generation failed after {attempts} attempts ({failure_reason}).", attempts
+
+    @staticmethod
+    def merge_storyboard_chunks(
+        chunks_output: List[Dict[str, Any]],
+        target_duration_mins: int,
+        target_lang: str = "en",
+        voice_speed: str = "fast",
+        source_duration_sec: float = 0,
+        dialogue_timeline: Optional[List[Dict[str, Any]]] = None,
+        evidence_packets: Optional[List[Any]] = None,
+        story_plan: Optional[List[Any]] = None
+    ) -> Tuple[Optional[str], bool, str, Dict[str, Any]]:
+        """
+        Phase 8A: Merges chunked storyboard texts into one unified storyboard script.
+        Applies duplicate boundary protection (removing repeated scene blocks, consecutive identical
+        sentences, or repeated dialogue references across chunk transitions) and runs global integrity validation.
+        """
+        if not chunks_output:
+            return "", False, "No chunks provided for merging.", {"error": "empty_chunks"}
+
+        sorted_chunks = sorted(chunks_output, key=lambda c: c.get("chunk_index", 0))
+
+        merged_blocks_raw: List[str] = []
+        prev_last_block_norm = ""
+        prev_last_dref_norm = ""
+        prev_last_ts = ""
+
+        for c_idx, c_data in enumerate(sorted_chunks):
+            c_text = c_data.get("text", "").strip()
+            if not c_text:
+                continue
+
+            raw_blocks = [b.strip() for b in re.split(r'\n\s*\n', c_text) if b.strip()]
+            if not raw_blocks:
+                continue
+
+            for b_i, block in enumerate(raw_blocks):
+                ts_m = re.search(r'(?:\[SCENE:\s*|\bSCENE\s*\d*:\s*|\[)?(\d{1,3}:\d{2}(?::\d{2})?\s*[-–—to]+\s*\d{1,3}:\d{2}(?::\d{2})?)\]?', block, re.IGNORECASE)
+                ts_str = ts_m.group(1).strip() if ts_m else ""
+
+                dref_m = re.search(r'\[DIALOGUE_REF:\s*["\']?(.*?)["\']?\]', block, re.IGNORECASE)
+                dref_str = dref_m.group(1).strip() if dref_m else ""
+
+                vo_m = re.search(r'(?:\[VOICEOVER\]|\bVOICEOVER\b\]?)\s*(.*)', block, flags=re.DOTALL | re.IGNORECASE)
+                vo_text = vo_m.group(1).strip() if vo_m else block
+
+                norm_block = " ".join(vo_text.split()[:20]).lower()
+
+                # Boundary duplicate detection against previous chunk's last block
+                is_duplicate = False
+                if b_i == 0 and c_idx > 0:
+                    if ts_str and prev_last_ts and ts_str == prev_last_ts:
+                        is_duplicate = True
+                    elif dref_str and prev_last_dref_norm and dref_str.lower() == prev_last_dref_norm:
+                        is_duplicate = True
+                    elif norm_block and prev_last_block_norm and difflib.SequenceMatcher(None, norm_block, prev_last_block_norm).ratio() > 0.85:
+                        is_duplicate = True
+
+                if is_duplicate:
+                    continue
+
+                # Check for consecutive identical sentences across boundary
+                if b_i == 0 and c_idx > 0 and merged_blocks_raw:
+                    prev_sentences = re.split(r'(?<=[.!?۔؟\n])\s+', merged_blocks_raw[-1].strip())
+                    curr_sentences = re.split(r'(?<=[.!?۔؟\n])\s+', block.strip())
+                    if prev_sentences and curr_sentences:
+                        last_s = prev_sentences[-1].strip().lower()
+                        first_s = curr_sentences[0].strip().lower()
+                        if last_s and first_s and (last_s == first_s or difflib.SequenceMatcher(None, last_s, first_s).ratio() > 0.90):
+                            block = " ".join(curr_sentences[1:]).strip()
+
+                merged_blocks_raw.append(block)
+                prev_last_block_norm = norm_block
+                prev_last_dref_norm = dref_str.lower() if dref_str else ""
+                prev_last_ts = ts_str
+
+        merged_text = "\n\n".join(merged_blocks_raw).strip()
+
+        # Clamp merged script to target word budget
+        clamped_text = ScriptEngine.clamp_script_word_budget(
+            merged_text,
+            target_duration_mins=target_duration_mins,
+            target_lang=target_lang,
+            voice_speed=voice_speed
+        )
+
+        is_valid, report, details = ScriptEngine.validate_script_integrity(
+            script_text=clamped_text,
+            source_duration_sec=source_duration_sec,
+            target_duration_mins=target_duration_mins,
+            target_lang=target_lang,
+            voice_speed=voice_speed,
+            dialogue_timeline=dialogue_timeline,
+            evidence_packets=evidence_packets,
+            story_plan=story_plan,
+            return_details=True,
+            strict_conformance=False
+        )
+
+        return clamped_text, is_valid, report, details
+
+    @staticmethod
+    def generate_long_form_script(
+        generate_fn: Callable[[str], Optional[str]],
+        title: str,
+        description: str,
+        subs_text: str = "",
+        target_lang: str = "en",
+        persona: str = "hollywood_trailer",
+        mood: str = "suspense",
+        duration_mins: int = 20,
+        plot_summary: str = "",
+        voice_speed: str = "fast",
+        genre: str = "movie_recap",
+        source_video_duration_sec: float = 0,
+        dialogue_timeline: Optional[List[Dict[str, Any]]] = None,
+        evidence_packets: Optional[List[Any]] = None,
+        story_plan: Optional[List[Any]] = None,
+        spoiler_mode: str = "full_recap",
+        max_chunk_words: int = 1200
+    ) -> Tuple[Optional[str], bool, str, int, Optional[Dict[str, Any]]]:
+        """
+        Phase 8A: Orchestrates bounded chunked script generation for long-form explainers.
+        Iteratively plans, generates, validates, and merges chunks across narrative acts.
+        """
+        chunks = ScriptEngine.plan_long_form_chunks(
+            target_duration_mins=duration_mins,
+            voice_speed=voice_speed,
+            target_lang=target_lang,
+            source_duration_sec=source_video_duration_sec,
+            dialogue_timeline=dialogue_timeline,
+            evidence_packets=evidence_packets,
+            story_plan=story_plan,
+            max_chunk_words=max_chunk_words
+        )
+
+        chunks_output: List[Dict[str, Any]] = []
+        total_attempts = 0
+        prev_summary: Optional[Dict[str, Any]] = None
+
+        for chunk in chunks:
+            chunk_prompt = ScriptEngine.build_chunk_prompt(
+                chunk=chunk,
+                title=title,
+                description=description,
+                plot_summary=plot_summary,
+                genre=genre,
+                persona=persona,
+                mood=mood,
+                spoiler_mode=spoiler_mode,
+                target_lang=target_lang,
+                voice_speed=voice_speed,
+                previous_chunk_summary=prev_summary
+            )
+
+            chunk_text, is_valid, chunk_report, attempts = ScriptEngine.generate_chunk_with_retry(
+                generate_fn=generate_fn,
+                chunk_prompt=chunk_prompt,
+                chunk=chunk,
+                target_lang=target_lang,
+                max_retries=ScriptEngine.MAX_CHUNK_RETRIES
+            )
+            total_attempts += attempts
+
+            if not is_valid or not chunk_text:
+                err_msg = f"Long-form generation aborted: Chunk {chunk['chunk_index']+1} ({chunk['act']}) failed: {chunk_report}"
+                return None, False, err_msg, total_attempts, {
+                    "error": "chunk_generation_failure",
+                    "failed_chunk": chunk["chunk_index"],
+                    "act": chunk["act"],
+                    "report": chunk_report
+                }
+
+            chunks_output.append({
+                "chunk_index": chunk["chunk_index"],
+                "act": chunk["act"],
+                "text": chunk_text
+            })
+
+            blocks = ScriptEngine.parse_storyboard_blocks(chunk_text)
+            if blocks:
+                last_b = blocks[-1]
+                ts_label = f"{int(last_b.movie_start//60):02d}:{int(last_b.movie_start%60):02d} - {int(last_b.movie_end//60):02d}:{int(last_b.movie_end%60):02d}"
+                prev_summary = {
+                    "last_scene_timestamp": ts_label,
+                    "last_dialogue_ref": getattr(last_b, "dialogue_ref", "") or "",
+                    "last_narration_snippet": last_b.narration_text[-120:] if len(last_b.narration_text) > 120 else last_b.narration_text
+                }
+            else:
+                prev_summary = None
+
+        merged_script, is_merged_valid, merge_report, merge_details = ScriptEngine.merge_storyboard_chunks(
+            chunks_output=chunks_output,
+            target_duration_mins=duration_mins,
+            target_lang=target_lang,
+            voice_speed=voice_speed,
+            source_duration_sec=source_video_duration_sec,
+            dialogue_timeline=dialogue_timeline,
+            evidence_packets=evidence_packets,
+            story_plan=story_plan
+        )
+
+        return merged_script, is_merged_valid, merge_report, total_attempts, merge_details
+
 
 
     @staticmethod
@@ -5129,14 +5640,28 @@ Emit the complete repaired storyboard with corrected scene ordering that respect
             return (False, msg, details) if return_details else (False, msg)
 
         # 1. Timeline Coverage Check
-        ts_matches = re.findall(r'(?:\[(?:SCENE:\s*)?|\b)(\d{1,2}):(\d{2})\s*-\s*(\d{1,2}):(\d{2})\]?', script_text)
+        def _parse_ts_to_sec(t: str) -> float:
+            parts = t.strip().split(':')
+            try:
+                if len(parts) == 2:
+                    return int(parts[0]) * 60 + float(parts[1])
+                elif len(parts) == 3:
+                    return int(parts[0]) * 3600 + int(parts[1]) * 60 + float(parts[2])
+            except Exception:
+                pass
+            return 0.0
+
+        ts_matches = re.findall(
+            r'(?:\[(?:SCENE:\s*)?|\b)(\d{1,3}:\d{2}(?::\d{2})?)\s*[-–—to]+\s*(\d{1,3}:\d{2}(?::\d{2})?)\]?',
+            script_text
+        )
         max_end_sec = 0.0
         if ts_matches:
             for m in ts_matches:
-                end_m, end_s = int(m[2]), int(m[3])
-                end_sec = end_m * 60 + end_s
+                end_sec = _parse_ts_to_sec(m[1])
                 if end_sec > max_end_sec:
                     max_end_sec = end_sec
+
 
         if source_duration_sec and source_duration_sec > 120:
             if max_end_sec == 0:
@@ -5486,7 +6011,8 @@ FORMATTING & AI DIRECTOR REQUIREMENTS:
         ai_provider: str = "auto",
         dialogue_timeline: Optional[List[Dict[str, Any]]] = None,
         enable_tts_feedback: bool = False,
-        tts_feedback_audio_path: Optional[str] = None
+        tts_feedback_audio_path: Optional[str] = None,
+        generate_fn: Optional[Callable[[str], Optional[str]]] = None
     ) -> Dict[str, Any]:
         """
         Generates a viral cinematic storytelling recap or universal explainer in any of the 15+ supported languages.
@@ -5587,6 +6113,64 @@ FORMATTING & AI DIRECTOR REQUIREMENTS:
 Each part must begin with a powerful hook.
 Separate each part strictly with '===PART===' on its own line."""
 
+        # Phase 8A: Direct generate_fn injection (for testing, custom providers, or mock execution)
+        if generate_fn is not None:
+            if duration_mins > ScriptEngine.LONG_FORM_DURATION_THRESHOLD_MINS:
+                fn_text, is_valid, val_report, attempts, val_details = ScriptEngine.generate_long_form_script(
+                    generate_fn=generate_fn,
+                    title=title,
+                    description=description,
+                    subs_text=subs_text,
+                    target_lang=target_lang,
+                    persona=persona,
+                    mood=mood,
+                    duration_mins=duration_mins,
+                    plot_summary=plot_summary,
+                    voice_speed=voice_speed,
+                    genre=genre,
+                    source_video_duration_sec=source_video_duration_sec,
+                    dialogue_timeline=dialogue_timeline,
+                    evidence_packets=evidence_packets,
+                    story_plan=story_plan,
+                    spoiler_mode=spoiler_mode
+                )
+            else:
+                fn_text, is_valid, val_report, attempts, val_details = ScriptEngine.generate_script_with_chronology_guard(
+                    generate_fn=generate_fn,
+                    initial_prompt=prompt,
+                    duration_mins=duration_mins,
+                    voice_speed=voice_speed,
+                    target_lang=target_lang,
+                    source_video_duration_sec=source_video_duration_sec,
+                    dialogue_timeline=dialogue_timeline,
+                    evidence_packets=evidence_packets,
+                    story_plan=story_plan
+                )
+            spoken_word_count_fn = ScriptEngine.get_spoken_word_count(fn_text) if fn_text else 0
+            hook_metrics = ScriptEngine.calculate_hook_score(fn_text, target_lang) if fn_text else {}
+            res = {
+                "success": bool(fn_text and is_valid),
+                "model": "custom_provider",
+                "script": (fn_text or "").strip(),
+                "language": target_lang,
+                "genre": genre,
+                "target_words": target_words,
+                "actual_words": spoken_word_count_fn,
+                "raw_words": len((fn_text or "").split()),
+                "hook_score": hook_metrics,
+                "story_beats": story_beats or [],
+                "is_valid": is_valid,
+                "integrity_report": val_report,
+                "attempts": attempts,
+                "evidence_packets": [p.to_dict() if hasattr(p, "to_dict") else p for p in evidence_packets],
+                "story_plan": [s.to_dict() if hasattr(s, "to_dict") else s for s in story_plan],
+                "is_plan_valid": is_plan_valid,
+                "plan_validation_report": plan_validation_report
+            }
+            if not is_valid and val_report:
+                res["error"] = val_report
+            return _apply_feedback(res)
+
         # 0. Check if active provider is Gemini or Custom via ai_router
         try:
             from app.services.ai_router import load_ai_settings, generate_narrative_text
@@ -5668,19 +6252,39 @@ Separate each part strictly with '===PART===' on its own line."""
                     except Exception:
                         return None
 
-                gpt_text, is_valid, val_report, attempts, val_details = ScriptEngine.generate_script_with_chronology_guard(
-                    generate_fn=oa_gen,
-                    initial_prompt=prompt,
-                    duration_mins=duration_mins,
-                    voice_speed=voice_speed,
-                    target_lang=target_lang,
-                    source_video_duration_sec=source_video_duration_sec,
-                    dialogue_timeline=dialogue_timeline,
-                    evidence_packets=evidence_packets,
-                    story_plan=story_plan,
-                    expand_fn=oa_expand if (duration_mins >= 3) else None,
-                    strict_conformance=(duration_mins >= 3)
-                )
+                if duration_mins > ScriptEngine.LONG_FORM_DURATION_THRESHOLD_MINS:
+                    gpt_text, is_valid, val_report, attempts, val_details = ScriptEngine.generate_long_form_script(
+                        generate_fn=oa_gen,
+                        title=title,
+                        description=description,
+                        subs_text=subs_text,
+                        target_lang=target_lang,
+                        persona=persona,
+                        mood=mood,
+                        duration_mins=duration_mins,
+                        plot_summary=plot_summary,
+                        voice_speed=voice_speed,
+                        genre=genre,
+                        source_video_duration_sec=source_video_duration_sec,
+                        dialogue_timeline=dialogue_timeline,
+                        evidence_packets=evidence_packets,
+                        story_plan=story_plan,
+                        spoiler_mode=spoiler_mode
+                    )
+                else:
+                    gpt_text, is_valid, val_report, attempts, val_details = ScriptEngine.generate_script_with_chronology_guard(
+                        generate_fn=oa_gen,
+                        initial_prompt=prompt,
+                        duration_mins=duration_mins,
+                        voice_speed=voice_speed,
+                        target_lang=target_lang,
+                        source_video_duration_sec=source_video_duration_sec,
+                        dialogue_timeline=dialogue_timeline,
+                        evidence_packets=evidence_packets,
+                        story_plan=story_plan,
+                        expand_fn=oa_expand if (duration_mins >= 3) else None,
+                        strict_conformance=(duration_mins >= 3)
+                    )
                 if gpt_text:
                     spoken_word_count_oa = ScriptEngine.get_spoken_word_count(gpt_text)
                     hook_metrics = ScriptEngine.calculate_hook_score(gpt_text, target_lang)
@@ -5739,19 +6343,39 @@ Separate each part strictly with '===PART===' on its own line."""
                     except Exception:
                         return None
 
-                nine_text, is_valid, val_report, attempts, val_details = ScriptEngine.generate_script_with_chronology_guard(
-                    generate_fn=nine_gen,
-                    initial_prompt=prompt,
-                    duration_mins=duration_mins,
-                    voice_speed=voice_speed,
-                    target_lang=target_lang,
-                    source_video_duration_sec=source_video_duration_sec,
-                    dialogue_timeline=dialogue_timeline,
-                    evidence_packets=evidence_packets,
-                    story_plan=story_plan,
-                    expand_fn=nine_expand if (duration_mins >= 3) else None,
-                    strict_conformance=(duration_mins >= 3)
-                )
+                if duration_mins > ScriptEngine.LONG_FORM_DURATION_THRESHOLD_MINS:
+                    nine_text, is_valid, val_report, attempts, val_details = ScriptEngine.generate_long_form_script(
+                        generate_fn=nine_gen,
+                        title=title,
+                        description=description,
+                        subs_text=subs_text,
+                        target_lang=target_lang,
+                        persona=persona,
+                        mood=mood,
+                        duration_mins=duration_mins,
+                        plot_summary=plot_summary,
+                        voice_speed=voice_speed,
+                        genre=genre,
+                        source_video_duration_sec=source_video_duration_sec,
+                        dialogue_timeline=dialogue_timeline,
+                        evidence_packets=evidence_packets,
+                        story_plan=story_plan,
+                        spoiler_mode=spoiler_mode
+                    )
+                else:
+                    nine_text, is_valid, val_report, attempts, val_details = ScriptEngine.generate_script_with_chronology_guard(
+                        generate_fn=nine_gen,
+                        initial_prompt=prompt,
+                        duration_mins=duration_mins,
+                        voice_speed=voice_speed,
+                        target_lang=target_lang,
+                        source_video_duration_sec=source_video_duration_sec,
+                        dialogue_timeline=dialogue_timeline,
+                        evidence_packets=evidence_packets,
+                        story_plan=story_plan,
+                        expand_fn=nine_expand if (duration_mins >= 3) else None,
+                        strict_conformance=(duration_mins >= 3)
+                    )
                 if nine_text:
                     spoken_word_count = ScriptEngine.get_spoken_word_count(nine_text)
                     hook_metrics = ScriptEngine.calculate_hook_score(nine_text, target_lang)
@@ -5807,19 +6431,39 @@ Separate each part strictly with '===PART===' on its own line."""
                     return None
 
                 try:
-                    text, is_valid, val_report, attempts, val_details = ScriptEngine.generate_script_with_chronology_guard(
-                        generate_fn=gemini_gen,
-                        initial_prompt=prompt,
-                        duration_mins=duration_mins,
-                        voice_speed=voice_speed,
-                        target_lang=target_lang,
-                        source_video_duration_sec=source_video_duration_sec,
-                        dialogue_timeline=dialogue_timeline,
-                        evidence_packets=evidence_packets,
-                        story_plan=story_plan,
-                        expand_fn=gemini_expand if (duration_mins >= 3) else None,
-                        strict_conformance=(duration_mins >= 3)
-                    )
+                    if duration_mins > ScriptEngine.LONG_FORM_DURATION_THRESHOLD_MINS:
+                        text, is_valid, val_report, attempts, val_details = ScriptEngine.generate_long_form_script(
+                            generate_fn=gemini_gen,
+                            title=title,
+                            description=description,
+                            subs_text=subs_text,
+                            target_lang=target_lang,
+                            persona=persona,
+                            mood=mood,
+                            duration_mins=duration_mins,
+                            plot_summary=plot_summary,
+                            voice_speed=voice_speed,
+                            genre=genre,
+                            source_video_duration_sec=source_video_duration_sec,
+                            dialogue_timeline=dialogue_timeline,
+                            evidence_packets=evidence_packets,
+                            story_plan=story_plan,
+                            spoiler_mode=spoiler_mode
+                        )
+                    else:
+                        text, is_valid, val_report, attempts, val_details = ScriptEngine.generate_script_with_chronology_guard(
+                            generate_fn=gemini_gen,
+                            initial_prompt=prompt,
+                            duration_mins=duration_mins,
+                            voice_speed=voice_speed,
+                            target_lang=target_lang,
+                            source_video_duration_sec=source_video_duration_sec,
+                            dialogue_timeline=dialogue_timeline,
+                            evidence_packets=evidence_packets,
+                            story_plan=story_plan,
+                            expand_fn=gemini_expand if (duration_mins >= 3) else None,
+                            strict_conformance=(duration_mins >= 3)
+                        )
                     if text:
                         spoken_word_count_g = ScriptEngine.get_spoken_word_count(text)
                         hook_metrics = ScriptEngine.calculate_hook_score(text, target_lang)

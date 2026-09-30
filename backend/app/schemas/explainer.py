@@ -8,7 +8,7 @@ class ScriptGenerateRequest(BaseModel):
     language: str = Field("en", description="Target story language code (e.g. en, es, id, ur, hi, ar)")
     persona: str = Field("hollywood_trailer", description="Storytelling persona / narrator style")
     mood: str = Field("suspense", description="Mood theme (suspense, action, emotional, upbeat)")
-    duration_mins: int = Field(3, ge=1, le=15, description="Target explainer duration in minutes")
+    duration_mins: int = Field(3, ge=1, description="Target explainer duration in minutes")
     spoiler_mode: str = Field("full_recap", description="full_recap or cliffhanger_teaser")
     format_mode: str = Field("reels_parts", description="reels_parts or full_video")
     num_parts: int = Field(3, ge=1, le=5, description="Number of series parts")
