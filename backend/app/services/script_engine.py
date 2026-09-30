@@ -2,6 +2,10 @@ import os
 import re
 import json
 import math
+import time
+import shutil
+import asyncio
+import tempfile
 import hashlib
 import difflib
 import requests
@@ -685,77 +689,517 @@ class ScriptEngine:
         has_dialogue = 1 if any(tag in block_text.lower() for tag in ["[dialogue_ref:", '"', '“']) else 0
         return (kw_count * 10.0) + (has_dialogue * 15.0) + (len(words) * 0.5)
 
+    # Phase 6H Duration Conformance Thresholds Grounded in Narrative Pacing Model:
+    # - Standard Explainer (>= 3m): 0.80 spoken word floor (matches existing expansion threshold)
+    #   Yields >= 78.4% of requested duration post-1.02x anti-copyright render.
+    # - Short Explainer (< 3m): 0.75 spoken word floor accommodates natural conversational cadence variance.
+    MIN_SPOKEN_CONFORMANCE_RATIO_STANDARD = 0.80
+    MIN_SPOKEN_CONFORMANCE_RATIO_SHORT = 0.75
+
+    @staticmethod
+    def get_spoken_word_count(script_text: str) -> int:
+        """
+        Extracts clean voiceover narration from a storyboard script
+        and returns the exact spoken narration word count, excluding
+        all scene tags, timestamps, dialogue_refs, and structural markup (Phase 6H).
+        """
+        if not script_text or not script_text.strip():
+            return 0
+        clean_narr, _, _ = ScriptEngine.parse_storyboard(script_text)
+        return len(clean_narr.split()) if clean_narr else len(script_text.split())
+
+    @staticmethod
+    def build_expansion_prompt(
+        current_script: str,
+        actual_words: Optional[int] = None,
+        target_words: int = 800,
+        target_lang: str = "en",
+        duration_mins: int = 5,
+        actual_spoken_words: Optional[int] = None,
+        genre: str = "movie_recap"
+    ) -> str:
+        """
+        Builds a structured expansion prompt for under-budget scripts (Phase 6H).
+        Instructs the LLM to expand ONLY the spoken narration under [VOICEOVER]
+        while strictly preserving all [SCENE: MM:SS - MM:SS] timestamps and
+        [DIALOGUE_REF: "..."] source quotes.
+        """
+        words_count = actual_spoken_words if actual_spoken_words is not None else (actual_words or 0)
+        lang_info = SUPPORTED_LANGUAGES.get(target_lang, SUPPORTED_LANGUAGES["en"])
+        return f"""You are an elite YouTube storytelling storyboard writer in natural colloquial {lang_info['name']}.
+The current storyboard script has only {words_count} spoken narration words, but the video requires AT LEAST {target_words} spoken words to match a full {duration_mins}-minute video.
+
+--- CURRENT STORYBOARD SCRIPT ---
+{current_script}
+--- END ---
+
+MANDATORY EXPANSION INSTRUCTIONS:
+1. PRESERVE THE EXACT STORYBOARD STRUCTURE: Every scene MUST retain its exact [SCENE: MM:SS - MM:SS] timestamp and its exact [DIALOGUE_REF: "..."] quote.
+2. DO NOT REMOVE OR FABRICATE [DIALOGUE_REF: "..."] tags: Keep all existing dialogue references intact and in their exact chronological order.
+3. EXPAND ONLY THE [VOICEOVER] NARRATION: Elaborate substantially on character dialogues, emotional reactions, dramatic tension, and atmospheric scene details within each scene's [VOICEOVER] block to bring the total spoken narration to AT LEAST {target_words} words.
+4. Deliver a fully fleshed-out, complete storyboard covering all scenes from beginning to climax. Output pure storyboard text without code blocks."""
+
+    # -------------------------------------------------------------------------
+    # Phase 6H.2: Authoritative TTS-Duration Feedback Loop Constants & Methods
+    # -------------------------------------------------------------------------
+    TTS_RENDER_FACTOR: float = 1.02
+    TTS_DURATION_TOLERANCE_SEC: float = 30.0
+    TTS_FEEDBACK_MAX_CORRECTIONS: int = 2
+
+    @staticmethod
+    def _compress_single_block_narration(block: str, ratio: float) -> str:
+        """Compresses narration sentences within a single [VOICEOVER] block."""
+        m = re.search(r'(\[VOICEOVER\]\s*)(.*)', block, flags=re.DOTALL | re.IGNORECASE)
+        if not m:
+            sentences = re.split(r'(?<=[.!?۔؟\n])\s+', block.strip())
+            if len(sentences) > 1:
+                target_count = max(1, int(round(len(sentences) * ratio)))
+                compressed = " ".join(sentences[:target_count]).strip()
+                if not any(compressed.endswith(p) for p in [".", "۔", "!", "?", "؟"]):
+                    compressed += "۔" if any(ord(c) > 1500 for c in compressed) else "."
+                return compressed
+            return block
+
+        prefix = block[:m.start(2)]
+        vo_content = m.group(2).strip()
+        sentences = re.split(r'(?<=[.!?۔؟\n])\s+', vo_content)
+        if len(sentences) > 1:
+            target_count = max(1, int(round(len(sentences) * ratio)))
+            compressed_vo = " ".join(sentences[:target_count]).strip()
+            if not any(compressed_vo.endswith(p) for p in [".", "۔", "!", "?", "؟"]):
+                compressed_vo += "۔" if any(ord(c) > 1500 for c in compressed_vo) else "."
+            return f"{prefix}{compressed_vo}"
+        return block
+
+    @staticmethod
+    def compress_storyboard_narration(script_text: str, ratio: float) -> str:
+        """
+        Compresses narration text strictly inside [VOICEOVER] blocks across scenes
+        by a proportional ratio, preserving all [SCENE] timestamps,
+        [DIALOGUE_REF] quotes, and narrative sequence (Phase 6H.2).
+        """
+        if not script_text or not script_text.strip() or ratio >= 1.0:
+            return script_text
+        ratio = max(0.2, min(0.95, float(ratio)))
+        blocks = [b.strip() for b in re.split(r'\n\s*\n', script_text.strip()) if b.strip()]
+        if not blocks:
+            return script_text
+
+        compressed_blocks = []
+        for idx, b in enumerate(blocks):
+            b_ratio = max(ratio, 0.85) if (idx == 0 or idx == len(blocks) - 1) else ratio
+            compressed_blocks.append(ScriptEngine._compress_single_block_narration(b, b_ratio))
+        return "\n\n".join(compressed_blocks).strip()
+
+    @staticmethod
+    def build_duration_correction_prompt(
+        current_script: str,
+        requested_duration_sec: float,
+        actual_tts_duration_sec: float,
+        current_spoken_words: int,
+        target_lang: str = "en",
+        direction: str = "expand",
+    ) -> str:
+        """
+        Builds an LLM prompt for TTS-duration-based narration correction (Phase 6H.2).
+        Explicitly informs the model of:
+        - exact requested final duration
+        - actual measured TTS duration
+        - projected final duration after 1.02 factor
+        - duration surplus or deficit
+        - current spoken word count
+        - source-grounded story constraints
+        """
+        lang_info = SUPPORTED_LANGUAGES.get(target_lang, SUPPORTED_LANGUAGES["en"])
+        render_factor = ScriptEngine.TTS_RENDER_FACTOR
+        projected_final = round(actual_tts_duration_sec / render_factor, 1)
+        requested = round(requested_duration_sec, 1)
+        duration_error = round(requested - projected_final, 1)
+        abs_error = abs(duration_error)
+
+        words_per_sec = current_spoken_words / max(1.0, actual_tts_duration_sec)
+        approx_word_delta = max(10, int(round(abs_error * words_per_sec)))
+
+        if direction == "expand":
+            direction_instruction = (
+                "Expand only the existing spoken narration to move the measured TTS runtime toward the "
+                "requested final duration. Do not invent new plot facts, events, dialogue, timestamps, or source anchors. "
+                f"Add more dramatic tension, character emotional reactions, and atmospheric scene exposition strictly inside each [VOICEOVER] block. "
+                f"Aim to add approximately {approx_word_delta} additional spoken words "
+                f"(~{abs_error:.1f}s of additional spoken audio at current speaking pace)."
+            )
+        else:
+            direction_instruction = (
+                "Compress only redundant/low-information spoken narration to move the measured TTS runtime toward the "
+                "requested final duration. Preserve all major plot events, twists, climax, resolution, source-grounded facts, and narrative order. "
+                f"Remove filler and repetitive sentences strictly inside each [VOICEOVER] block. "
+                f"Aim to remove approximately {approx_word_delta} spoken words "
+                f"(~{abs_error:.1f}s of spoken narration reduction at current speaking pace)."
+            )
+
+        return f"""You are an elite YouTube storytelling storyboard writer in natural colloquial {lang_info['name']}.
+
+DURATION CORRECTION CONTEXT:
+- Requested final video duration: {requested:.1f}s ({requested/60:.2f} min)
+- Current measured TTS audio duration: {actual_tts_duration_sec:.1f}s
+- Projected final video duration (after {render_factor}x render factor): {projected_final:.1f}s ({projected_final/60:.2f} min)
+- Duration error: {'+' if duration_error > 0 else ''}{duration_error:.1f}s ({'SHORT' if duration_error > 0 else 'LONG'})
+- Current spoken word count: {current_spoken_words} words
+- Estimated word adjustment: ~{approx_word_delta} words to {'add' if direction == 'expand' else 'remove'}
+
+MANDATORY CORRECTION INSTRUCTIONS:
+{direction_instruction}
+
+STRICT STRUCTURAL CONSTRAINTS:
+1. PRESERVE THE EXACT STORYBOARD STRUCTURE: Every scene MUST retain its exact [SCENE: MM:SS - MM:SS] timestamp and its exact [DIALOGUE_REF: "..."] quote.
+2. DO NOT REMOVE OR FABRICATE [DIALOGUE_REF: "..."] tags: Keep all existing dialogue references intact and in their exact chronological order.
+3. MODIFY ONLY THE [VOICEOVER] NARRATION: Do NOT alter scene boundaries, timestamps, or dialogue quotes.
+4. Deliver a complete storyboard from beginning to climax. Output pure storyboard text without code blocks.
+
+--- CURRENT STORYBOARD SCRIPT ---
+{current_script}
+--- END ---
+
+Output the complete corrected storyboard below:"""
+
+    @staticmethod
+    async def converge_script_duration_with_tts_feedback(
+        script_text: str,
+        duration_mins: int,
+        target_lang: str = "en",
+        voice_speed: str = "fast",
+        voice: Optional[str] = None,
+        rate: Optional[str] = None,
+        pitch: Optional[str] = None,
+        output_audio_path: Optional[str] = None,
+        temp_dir: Optional[str] = None,
+        tolerance_sec: Optional[float] = None,
+        max_corrections: int = 2,
+        llm_correction_fn: Optional[Callable[[str], Optional[str]]] = None,
+        dialogue_timeline: Optional[List[Dict[str, Any]]] = None,
+        evidence_packets: Optional[List[Any]] = None,
+        story_plan: Optional[List[Any]] = None,
+        synthesize_fn: Optional[Callable[[str, str, str, str, str], Any]] = None,
+        measure_fn: Optional[Callable[[str], float]] = None,
+    ) -> Dict[str, Any]:
+        """
+        Phase 6H.2: Authoritative TTS-Duration Feedback Loop.
+        Iteratively validates and bounds actual synthesized TTS duration against
+        requested duration post-1.02x render speedup.
+        Enforces maximum 2 correction attempts.
+        """
+        import time
+        import shutil
+        import tempfile
+        from app.services.voice_engine import VoiceEngine
+
+        requested_duration_sec = float(duration_mins * 60)
+        render_factor = ScriptEngine.TTS_RENDER_FACTOR
+        eff_tolerance = float(
+            tolerance_sec if tolerance_sec is not None else ScriptEngine.TTS_DURATION_TOLERANCE_SEC
+        )
+        max_corr = min(ScriptEngine.TTS_FEEDBACK_MAX_CORRECTIONS, max(0, int(max_corrections)))
+
+        chosen_voice = voice or VoiceEngine.get_default_voice_for_lang(target_lang)
+        speed_map = {"normal": "+0%", "fast": "+15%", "ultra_fast": "+18%"}
+        rate_val = rate or speed_map.get(voice_speed, "+15%" if voice_speed == "fast" else "+0%")
+        pitch_val = pitch or ("-12Hz" if rate_val in ["+15%", "+18%", "+20%", "+25%"] else "+0Hz")
+
+        work_dir = temp_dir or tempfile.gettempdir()
+        final_audio = output_audio_path or os.path.join(
+            work_dir, f"tts_converged_{int(time.time() * 1000)}.mp3"
+        )
+
+        active_llm = llm_correction_fn
+        if active_llm is None:
+            try:
+                from app.services.nine_router_client import is_ninerouter_available, call_ninerouter_llm
+                if is_ninerouter_available(timeout_sec=5.0):
+                    def _default_9r_llm(p: str) -> Optional[str]:
+                        return call_ninerouter_llm(
+                            prompt=p,
+                            system_prompt="You are an elite YouTube storyboard scriptwriter.",
+                            timeout_sec=90,
+                            max_tokens=4000
+                        )
+                    active_llm = _default_9r_llm
+            except Exception:
+                pass
+
+        async def _synth_and_measure(s_text: str, dest_path: str) -> Tuple[bool, float]:
+            clean_narr, _, _ = ScriptEngine.parse_storyboard(s_text)
+            if not clean_narr.strip():
+                clean_narr = ScriptEngine.strip_production_tags(s_text)
+            if not clean_narr.strip():
+                return False, 0.0
+
+            if synthesize_fn is not None:
+                res = synthesize_fn(clean_narr, chosen_voice, dest_path, rate_val, pitch_val)
+                if asyncio.iscoroutine(res):
+                    ok = await res
+                else:
+                    ok = bool(res)
+            else:
+                ok = await VoiceEngine.synthesize_speech(
+                    text=clean_narr,
+                    voice=chosen_voice,
+                    output_path=dest_path,
+                    rate=rate_val,
+                    pitch=pitch_val
+                )
+
+            if not ok or not os.path.exists(dest_path):
+                return False, 0.0
+
+            if measure_fn is not None:
+                dur = measure_fn(dest_path)
+            else:
+                dur = VoiceEngine.get_audio_duration(dest_path)
+            return True, float(dur)
+
+        # Initial synthesis & measurement (Attempt 0)
+        curr_script = script_text
+        curr_audio = os.path.join(work_dir, f"tts_feedback_att0_{int(time.time() * 1000)}.mp3")
+        ok, tts_dur = await _synth_and_measure(curr_script, curr_audio)
+        if not ok:
+            return {
+                "success": False,
+                "script": script_text,
+                "audio_path": None,
+                "requested_duration_seconds": requested_duration_sec,
+                "initial_tts_duration": 0.0,
+                "final_tts_duration": 0.0,
+                "initial_projected_final_duration": 0.0,
+                "final_projected_final_duration": 0.0,
+                "duration_error_seconds": requested_duration_sec,
+                "duration_converged": False,
+                "correction_attempts": 0,
+                "initial_spoken_words": ScriptEngine.get_spoken_word_count(script_text),
+                "final_spoken_words": ScriptEngine.get_spoken_word_count(script_text),
+                "reason": "Initial TTS synthesis failed."
+            }
+
+        proj_dur = tts_dur / render_factor
+        dur_err = requested_duration_sec - proj_dur
+        curr_words = ScriptEngine.get_spoken_word_count(curr_script)
+
+        initial_tts_duration = tts_dur
+        initial_projected_final_duration = proj_dur
+        initial_spoken_words = curr_words
+
+        best_script = curr_script
+        best_audio = curr_audio
+        best_tts_dur = tts_dur
+        best_proj_dur = proj_dur
+        best_err = dur_err
+        best_words = curr_words
+        converged = abs(dur_err) <= eff_tolerance
+        attempts_executed = 0
+
+        # Bounded Correction Loop (up to max_corr attempts)
+        if not converged and max_corr > 0:
+            for attempt_idx in range(1, max_corr + 1):
+                direction = "expand" if best_err > 0 else "compress"
+                correction_prompt = ScriptEngine.build_duration_correction_prompt(
+                    current_script=best_script,
+                    requested_duration_sec=requested_duration_sec,
+                    actual_tts_duration_sec=best_tts_dur,
+                    current_spoken_words=best_words,
+                    target_lang=target_lang,
+                    direction=direction
+                )
+
+                cand_script = None
+                if active_llm is not None:
+                    cand_raw = active_llm(correction_prompt)
+                    if cand_raw and len(cand_raw.strip()) > 50:
+                        cand_script = ScriptEngine.strip_code_and_developer_artifacts(cand_raw)
+
+                if not cand_script and direction == "compress":
+                    compress_ratio = requested_duration_sec / max(1.0, best_proj_dur)
+                    cand_script = ScriptEngine.compress_storyboard_narration(best_script, compress_ratio)
+
+                if not cand_script:
+                    break
+
+                # Chronology and structure validation gate
+                is_valid, report, details = ScriptEngine.validate_script_integrity(
+                    cand_script,
+                    source_duration_sec=0,
+                    target_duration_mins=duration_mins,
+                    target_lang=target_lang,
+                    voice_speed=voice_speed,
+                    dialogue_timeline=dialogue_timeline,
+                    evidence_packets=evidence_packets,
+                    story_plan=story_plan,
+                    return_details=True,
+                    strict_conformance=False
+                )
+                if details and details.get("error") == "chronology_violation":
+                    continue
+
+                cand_audio = os.path.join(work_dir, f"tts_feedback_att{attempt_idx}_{int(time.time() * 1000)}.mp3")
+                c_ok, c_dur = await _synth_and_measure(cand_script, cand_audio)
+                if not c_ok:
+                    continue
+
+                attempts_executed += 1
+                c_proj = c_dur / render_factor
+                c_err = requested_duration_sec - c_proj
+                c_words = ScriptEngine.get_spoken_word_count(cand_script)
+
+                if abs(c_err) < abs(best_err):
+                    best_script = cand_script
+                    best_audio = cand_audio
+                    best_tts_dur = c_dur
+                    best_proj_dur = c_proj
+                    best_err = c_err
+                    best_words = c_words
+
+                if abs(best_err) <= eff_tolerance:
+                    converged = True
+                    break
+
+        if best_audio != final_audio and os.path.exists(best_audio):
+            try:
+                shutil.copyfile(best_audio, final_audio)
+                best_cues = os.path.splitext(best_audio)[0] + "_cues.json"
+                final_cues = os.path.splitext(final_audio)[0] + "_cues.json"
+                if os.path.exists(best_cues):
+                    shutil.copyfile(best_cues, final_cues)
+            except Exception:
+                final_audio = best_audio
+        else:
+            final_audio = best_audio
+
+        reason = "converged_within_tolerance" if converged else (
+            f"Failed to converge within {eff_tolerance:.1f}s tolerance after {attempts_executed} correction attempts "
+            f"(final error: {best_err:+.1f}s, requested: {requested_duration_sec:.1f}s, projected: {best_proj_dur:.1f}s)."
+        )
+
+        return {
+            "success": True,
+            "script": best_script,
+            "audio_path": final_audio,
+            "requested_duration_seconds": requested_duration_sec,
+            "initial_tts_duration": initial_tts_duration,
+            "final_tts_duration": best_tts_dur,
+            "initial_projected_final_duration": initial_projected_final_duration,
+            "final_projected_final_duration": best_proj_dur,
+            "duration_error_seconds": best_err,
+            "duration_converged": converged,
+            "correction_attempts": attempts_executed,
+            "initial_spoken_words": initial_spoken_words,
+            "final_spoken_words": best_words,
+            "reason": reason
+        }
+
+    @staticmethod
+    def converge_script_duration_with_tts_feedback_sync(
+        *args, **kwargs
+    ) -> Dict[str, Any]:
+        """Synchronous wrapper for converge_script_duration_with_tts_feedback."""
+        import asyncio
+        try:
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                import concurrent.futures
+                with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+                    future = executor.submit(
+                        asyncio.run,
+                        ScriptEngine.converge_script_duration_with_tts_feedback(*args, **kwargs)
+                    )
+                    return future.result()
+            else:
+                return loop.run_until_complete(
+                    ScriptEngine.converge_script_duration_with_tts_feedback(*args, **kwargs)
+                )
+        except RuntimeError:
+            return asyncio.run(
+                ScriptEngine.converge_script_duration_with_tts_feedback(*args, **kwargs)
+            )
+
     @staticmethod
     def clamp_script_word_budget(
         script_text: str,
         target_duration_mins: int = 3,
         target_lang: str = "en",
-        voice_speed: str = "fast"
+        voice_speed: str = "fast",
+        anti_copyright_drift: bool = True
     ) -> str:
         """
-        Non-Destructive Narrative Auto-Budgeting.
+        Non-Destructive Narrative Auto-Budgeting based on SPOKEN NARRATION WORDS (Phase 6H).
         Clamps storyboard script length to strict duration-budget word ceilings
-        WITHOUT severing the climax or final scenes.
+        WITHOUT severing the climax, final scenes, or structural storyboard markup.
         Pillars (Scene 1 Hook & Final Climax/Ending) are permanently protected.
         """
         if not script_text or not script_text.strip():
             return script_text
 
-        target_words = ScriptEngine.calculate_target_words(target_duration_mins, voice_speed, target_lang)
+        target_words = ScriptEngine.calculate_target_words(
+            target_duration_mins, voice_speed, target_lang, anti_copyright_drift=anti_copyright_drift
+        )
         # Allow buffer up to +8%
         max_words = max(180, int(round(target_words * 1.08)))
 
-        words = script_text.split()
-        if len(words) <= max_words:
+        spoken_words = ScriptEngine.get_spoken_word_count(script_text)
+        if spoken_words <= max_words:
             return script_text
+
+        def _compress_block_narration(block: str, ratio: float) -> str:
+            m = re.search(r'(\[VOICEOVER\]\s*)(.*)', block, flags=re.DOTALL | re.IGNORECASE)
+            if not m:
+                sentences = re.split(r'(?<=[.!?۔؟\n])\s+', block.strip())
+                if len(sentences) > 1:
+                    target_count = max(1, int(round(len(sentences) * ratio)))
+                    compressed = " ".join(sentences[:target_count]).strip()
+                    if not any(compressed.endswith(p) for p in [".", "۔", "!", "?", "؟"]):
+                        compressed += "۔" if any(ord(c) > 1500 for c in compressed) else "."
+                    return compressed
+                return block
+
+            prefix = block[:m.start(2)]
+            vo_content = m.group(2).strip()
+            sentences = re.split(r'(?<=[.!?۔؟\n])\s+', vo_content)
+            if len(sentences) > 1:
+                target_count = max(1, int(round(len(sentences) * ratio)))
+                compressed_vo = " ".join(sentences[:target_count]).strip()
+                if not any(compressed_vo.endswith(p) for p in [".", "۔", "!", "?", "؟"]):
+                    compressed_vo += "۔" if any(ord(c) > 1500 for c in compressed_vo) else "."
+                return f"{prefix}{compressed_vo}"
+            return block
 
         # Split into scene blocks
         blocks = [b.strip() for b in re.split(r'\n\s*\n', script_text.strip()) if b.strip()]
         if len(blocks) > 2:
-            # Pillar 1: First scene (Hook)
             pillar_first = blocks[0]
-            # Pillar 2: Last scene (Climax / Ending)
             pillar_last = blocks[-1]
 
-            p1_words = len(pillar_first.split())
-            p2_words = len(pillar_last.split())
+            p1_words = ScriptEngine.get_spoken_word_count(pillar_first)
+            p2_words = ScriptEngine.get_spoken_word_count(pillar_last)
 
             middle_blocks = blocks[1:-1]
             remaining_budget = max(50, max_words - (p1_words + p2_words))
-
-            # Total middle words
-            mid_words = sum(len(b.split()) for b in middle_blocks)
+            mid_words = sum(ScriptEngine.get_spoken_word_count(b) for b in middle_blocks)
 
             if mid_words <= remaining_budget:
                 retained_middle = middle_blocks
             else:
-                # Proportional compression of middle blocks
                 compression_ratio = remaining_budget / max(1, mid_words)
-                retained_middle = []
-                for b in middle_blocks:
-                    b_sentences = re.split(r'(?<=[.!?۔؟\n])\s+', b.strip())
-                    if len(b_sentences) > 1:
-                        target_s_count = max(1, int(round(len(b_sentences) * compression_ratio)))
-                        compressed_b = " ".join(b_sentences[:target_s_count]).strip()
-                        if not any(compressed_b.endswith(p) for p in [".", "۔", "!", "?", "؟"]):
-                            compressed_b += "۔" if any(ord(c) > 1500 for c in compressed_b) else "."
-                        retained_middle.append(compressed_b)
-                    else:
-                        retained_middle.append(b)
+                retained_middle = [_compress_block_narration(b, compression_ratio) for b in middle_blocks]
 
-                # If still over budget, drop least critical intermediate blocks via content-aware scoring
-                cur_total = p1_words + p2_words + sum(len(b.split()) for b in retained_middle)
+                cur_total = p1_words + p2_words + sum(ScriptEngine.get_spoken_word_count(b) for b in retained_middle)
                 while cur_total > max_words and len(retained_middle) > 1:
                     drop_idx = min(
                         range(len(retained_middle)),
                         key=lambda i: (
                             ScriptEngine._evaluate_block_importance(retained_middle[i]),
-                            len(retained_middle[i].split()),
+                            ScriptEngine.get_spoken_word_count(retained_middle[i]),
                             -i
                         )
                     )
                     retained_middle.pop(drop_idx)
-                    cur_total = p1_words + p2_words + sum(len(b.split()) for b in retained_middle)
+                    cur_total = p1_words + p2_words + sum(ScriptEngine.get_spoken_word_count(b) for b in retained_middle)
 
             final_blocks = [pillar_first] + retained_middle + [pillar_last]
             result = "\n\n".join(final_blocks).strip()
@@ -768,11 +1212,11 @@ class ScriptEngine:
         if len(sentences) > 2:
             first_s = sentences[0]
             last_s = sentences[-1]
-            rem_words = max_words - (len(first_s.split()) + len(last_s.split()))
+            rem_words = max_words - (ScriptEngine.get_spoken_word_count(first_s) + ScriptEngine.get_spoken_word_count(last_s))
             retained_mid = []
             cur_w = 0
             for s in sentences[1:-1]:
-                s_w = len(s.split())
+                s_w = ScriptEngine.get_spoken_word_count(s)
                 if cur_w + s_w <= rem_words:
                     retained_mid.append(s)
                     cur_w += s_w
@@ -846,7 +1290,7 @@ class ScriptEngine:
         # 1. Bracketed tags (LTR and RTL reversed brackets)
         c = re.sub(r'[\[\]]\s*(?:SCENE|TIME|VOICEOVER|SFX|DIALOGUE_REF|PART|BANNER)\b[^\[\]\n]*[\[\]]', ' ', t, flags=re.IGNORECASE)
         # 2. Standalone tags at line start or followed by colon/bracket
-        c = re.sub(r'^\s*(?:SCENE|TIME|VOICEOVER|SFX|DIALOGUE_REF|BANNER)\b[^:\n]*[:\n]?', ' ', c, flags=re.MULTILINE | re.IGNORECASE)
+        c = re.sub(r'^\s*(?:SCENE|TIME|VOICEOVER|SFX|DIALOGUE_REF|BANNER)\b[^:\n]*[:\]]', ' ', c, flags=re.MULTILINE | re.IGNORECASE)
         # 3. Explicit tag patterns with colons or closing brackets (e.g. [SFX: HEARTBEAT, VOICEOVER], SCENE: 01:00])
         c = re.sub(r'(?:\[|\b)(?:SCENE|TIME|VOICEOVER|SFX|DIALOGUE_REF|BANNER)\s*:[^\]\n]*\]?', ' ', c, flags=re.IGNORECASE)
         c = re.sub(r'\b(?:SCENE|VOICEOVER|SFX|DIALOGUE_REF|BANNER)\b\s*\]', ' ', c, flags=re.IGNORECASE)
@@ -855,7 +1299,7 @@ class ScriptEngine:
         # 5. Any remaining bracketed content
         c = re.sub(r'\[.*?\]', ' ', c)
         # 6. Standalone lines of keywords or horizontal rules
-        c = re.sub(r'^\s*(?:SCENE|TIME|VOICEOVER|SFX|BANNER|DIALOGUE_REF|DIALOGUE)\b.*$', '', c, flags=re.MULTILINE | re.IGNORECASE)
+        c = re.sub(r'^\s*(?:SCENE|TIME|VOICEOVER|SFX|BANNER|DIALOGUE_REF|DIALOGUE)(?:\s*\d+)?\s*(?:[:\]\-]|$).*$', '', c, flags=re.MULTILINE | re.IGNORECASE)
         c = re.sub(r'^\s*[=\-~_]{2,}.*$', '', c, flags=re.MULTILINE)
         # 7. Strip isolated brackets, asterisks, hashes
         c = re.sub(r'[\[\]\*#_~`]', ' ', c)
@@ -2258,7 +2702,8 @@ Emit the complete repaired storyboard with corrected scene ordering that respect
         dialogue_timeline: Optional[List[Dict[str, Any]]] = None,
         evidence_packets: Optional[List[Any]] = None,
         story_plan: Optional[List[Any]] = None,
-        expand_fn: Optional[Callable[[str, int], Optional[str]]] = None
+        expand_fn: Optional[Callable[[str, int], Optional[str]]] = None,
+        strict_conformance: bool = False
     ) -> Tuple[Optional[str], bool, str, int, Optional[Dict[str, Any]]]:
         """
         Phase 6G.4: Controlled Single-Turn Chronology Failure Handling.
@@ -2277,11 +2722,22 @@ Emit the complete repaired storyboard with corrected scene ordering that respect
         text = ScriptEngine.strip_code_and_developer_artifacts(raw_text)
 
         if expand_fn:
-            clean_test, _, _ = ScriptEngine.parse_storyboard(text)
-            actual_words = len(clean_test.split())
-            expanded = expand_fn(text, actual_words)
-            if expanded and len(expanded.split()) > actual_words:
-                text = ScriptEngine.strip_code_and_developer_artifacts(expanded.strip())
+            actual_words = ScriptEngine.get_spoken_word_count(text)
+            tw_conformance = ScriptEngine.calculate_target_words(
+                duration_mins, voice_speed, target_lang, anti_copyright_drift=True
+            )
+            min_conformance = int(tw_conformance * (
+                ScriptEngine.MIN_SPOKEN_CONFORMANCE_RATIO_STANDARD
+                if duration_mins >= 3
+                else ScriptEngine.MIN_SPOKEN_CONFORMANCE_RATIO_SHORT
+            ))
+            if actual_words < min_conformance:
+                expanded = expand_fn(text, actual_words)
+                if expanded:
+                    expanded_clean = ScriptEngine.strip_code_and_developer_artifacts(expanded.strip())
+                    exp_spoken = ScriptEngine.get_spoken_word_count(expanded_clean)
+                    if exp_spoken > actual_words:
+                        text = expanded_clean
 
         text = ScriptEngine.clamp_script_word_budget(
             text.strip(),
@@ -2299,7 +2755,8 @@ Emit the complete repaired storyboard with corrected scene ordering that respect
             dialogue_timeline=dialogue_timeline,
             evidence_packets=evidence_packets,
             story_plan=story_plan,
-            return_details=True
+            return_details=True,
+            strict_conformance=strict_conformance
         )
 
         if is_valid:
@@ -2336,7 +2793,8 @@ Emit the complete repaired storyboard with corrected scene ordering that respect
                     dialogue_timeline=dialogue_timeline,
                     evidence_packets=evidence_packets,
                     story_plan=story_plan,
-                    return_details=True
+                    return_details=True,
+                    strict_conformance=strict_conformance
                 )
                 if is_valid_r:
                     return retry_text, True, val_report_r, attempts, val_details_r
@@ -3721,12 +4179,22 @@ Emit the complete repaired storyboard with corrected scene ordering that respect
     }
 
     @staticmethod
-    def calculate_target_words(duration_mins: int, voice_speed: str = "fast", target_lang: str = "en") -> int:
-        """Calculates spoken target word count dynamically based on duration, language pace, and speed without caps."""
+    def calculate_target_words(
+        duration_mins: int,
+        voice_speed: str = "fast",
+        target_lang: str = "en",
+        anti_copyright_drift: bool = False
+    ) -> int:
+        """
+        Calculates spoken target word count dynamically based on duration, language pace, and speed.
+        When anti_copyright_drift=True, scales by 1.02 to compensate for downstream PTS/atempo micro-drift.
+        Defaults to anti_copyright_drift=False to maintain backward-compatibility with baseline tests.
+        """
         base_wpm = ScriptEngine.LANGUAGE_WPM.get(target_lang, 150)
         mult = ScriptEngine.SPEED_MULTIPLIER.get(voice_speed, 1.15)
         d_mins = max(1, int(duration_mins)) if duration_mins else 5
-        return max(100, int(round(d_mins * base_wpm * mult)))
+        drift_factor = 1.02 if anti_copyright_drift else 1.0
+        return max(100, int(round(d_mins * base_wpm * mult * drift_factor)))
 
     @staticmethod
     def calculate_dynamic_pacing(source_duration_sec: float) -> Dict[str, Any]:
@@ -3830,15 +4298,16 @@ Emit the complete repaired storyboard with corrected scene ordering that respect
         dialogue_timeline: Optional[List[Dict[str, Any]]] = None,
         evidence_packets: Optional[List[Any]] = None,
         story_plan: Optional[List[Any]] = None,
-        return_details: bool = False
+        return_details: bool = False,
+        strict_conformance: bool = False
     ) -> Union[Tuple[bool, str], Tuple[bool, str, Dict[str, Any]]]:
         """
         Universal Automated Quality Gatekeeper.
         Verifies:
         1. Timeline Coverage: Last scene timestamp covers >= 85% of source video timeline.
-        2. Word Budget Drift: Actual words are within acceptable range (not severely under-budget).
-        3. Structural Pillars: Valid scene format and narrative closure.
-        4. Phase 6G.3: Storyboard Source Chronology Gate (monotonic non-decreasing source evidence).
+        2. Phase 6G.3: Storyboard Source Chronology Gate (monotonic non-decreasing source evidence).
+        3. Word Budget Drift: Actual words are within acceptable range (not severely under-budget).
+        4. Structural Pillars: Valid scene format and narrative closure.
         """
         if not script_text or not script_text.strip():
             msg = "Script is empty."
@@ -3866,17 +4335,7 @@ Emit the complete repaired storyboard with corrected scene ordering that respect
                 details = {"is_valid": False, "error": "insufficient_coverage", "failure_type": "insufficient_coverage", "coverage_pct": coverage_pct, "violations": []}
                 return (False, msg, details) if return_details else (False, msg)
 
-        # 2. Word Budget Check (Measured on clean spoken narration)
-        clean_narr, _, _ = ScriptEngine.parse_storyboard(script_text)
-        spoken_words = len(clean_narr.split()) if clean_narr else len(script_text.split())
-        target_words = ScriptEngine.calculate_target_words(target_duration_mins, voice_speed, target_lang)
-        min_allowed = int(target_words * 0.55) if target_duration_mins >= 5 else int(target_words * 0.50)
-        if spoken_words < min_allowed:
-            msg = f"Script is severely under-budget ({spoken_words} spoken words, minimum expected {min_allowed} for {target_duration_mins}m video)."
-            details = {"is_valid": False, "error": "under_budget", "failure_type": "under_budget", "spoken_words": spoken_words, "min_allowed": min_allowed, "violations": []}
-            return (False, msg, details) if return_details else (False, msg)
-
-        # 3. Phase 6G.3: Storyboard Source Chronology Gate
+        # 2. Phase 6G.3: Storyboard Source Chronology Gate (Structural Priority)
         chron_details = {"is_valid": True, "violations": [], "failure_type": None}
         if (dialogue_timeline and len(dialogue_timeline) > 0) or (evidence_packets and len(evidence_packets) > 0):
             val_blocks = ScriptEngine.parse_storyboard_blocks(
@@ -3896,8 +4355,69 @@ Emit the complete repaired storyboard with corrected scene ordering that respect
                 res_msg = f"Script failed chronology gate: {chron_msg}"
                 return (False, res_msg, chron_details) if return_details else (False, res_msg)
 
+        # 3. Spoken Word Budget Conformance Check (Phase 6H)
+        spoken_words = ScriptEngine.get_spoken_word_count(script_text)
+        if strict_conformance:
+            target_words = ScriptEngine.calculate_target_words(
+                target_duration_mins, voice_speed, target_lang, anti_copyright_drift=True
+            )
+            min_ratio = (
+                ScriptEngine.MIN_SPOKEN_CONFORMANCE_RATIO_STANDARD
+                if target_duration_mins >= 3
+                else ScriptEngine.MIN_SPOKEN_CONFORMANCE_RATIO_SHORT
+            )
+        else:
+            target_words = ScriptEngine.calculate_target_words(
+                target_duration_mins, voice_speed, target_lang, anti_copyright_drift=False
+            )
+            min_ratio = 0.55 if target_duration_mins >= 5 else 0.50
+
+        min_allowed = int(target_words * min_ratio)
+        if spoken_words < min_allowed:
+            msg = f"Script is severely under-budget ({spoken_words} spoken words, minimum expected {min_allowed} for {target_duration_mins}m video, ratio: {spoken_words/target_words:.2f} < {min_ratio:.2f})."
+            details = {
+                "is_valid": False,
+                "error": "under_budget",
+                "failure_type": "under_budget",
+                "spoken_words": spoken_words,
+                "target_words": target_words,
+                "min_allowed": min_allowed,
+                "min_ratio": min_ratio,
+                "violations": []
+            }
+            return (False, msg, details) if return_details else (False, msg)
+
         res_msg = "Script passed all universal integrity gates."
         return (True, res_msg, chron_details) if return_details else (True, res_msg)
+
+    @staticmethod
+    def validate_script_length(
+        script_text: str,
+        source_duration_sec: float = 0,
+        target_duration_mins: int = 10,
+        target_lang: str = "en",
+        voice_speed: str = "fast",
+        dialogue_timeline: Optional[List[Dict[str, Any]]] = None,
+        evidence_packets: Optional[List[Any]] = None,
+        story_plan: Optional[List[Any]] = None,
+        return_details: bool = False
+    ) -> Union[Tuple[bool, str], Tuple[bool, str, Dict[str, Any]]]:
+        """
+        Validates spoken word count against the duration conformance floor (Phase 6H).
+        Enforces >= 80% target spoken words for >= 3m, and >= 75% for < 3m.
+        """
+        return ScriptEngine.validate_script_integrity(
+            script_text=script_text,
+            source_duration_sec=source_duration_sec,
+            target_duration_mins=target_duration_mins,
+            target_lang=target_lang,
+            voice_speed=voice_speed,
+            dialogue_timeline=dialogue_timeline,
+            evidence_packets=evidence_packets,
+            story_plan=story_plan,
+            return_details=return_details,
+            strict_conformance=True
+        )
 
     @staticmethod
     def build_prompt_for_genre(
@@ -3919,7 +4439,9 @@ Emit the complete repaired storyboard with corrected scene ordering that respect
         """Builds tailored, multi-act prompt blueprint for universal video genres with strict length quotas."""
         lang_info = SUPPORTED_LANGUAGES.get(target_lang, SUPPORTED_LANGUAGES["en"])
         lang_name = lang_info["name"]
-        target_words = ScriptEngine.calculate_target_words(duration_mins, voice_speed, target_lang)
+        target_words = ScriptEngine.calculate_target_words(
+            duration_mins, voice_speed, target_lang, anti_copyright_drift=True
+        )
 
         act1_words = int(round(target_words * 0.25))
         act2_words = int(round(target_words * 0.50))
@@ -4089,7 +4611,7 @@ OBJECTIVES:
    - STORY ARCHITECTURE & CHARACTER MOTIVATION: Do NOT merely produce a chronological list of isolated dialogue quotes. In Act 1, introduce the protagonist and main figures, explain the premise/logline and dramatic conflict (who are they, what is their feud or goal?), and weave spoken dialogues naturally into narrative sentences (e.g. 'As the party spiraled into chaos, Dawood coldly warned Arbaaz: ...').
 2. Tone & Master Storyteller Voice: {persona_guide} (Overall Mood: {mood.upper()}).
    - CONVERSATIONAL STORYTELLING: Deliver the story in an engaging, conversational tone — as if you are telling an intense, captivating story directly to a friend. Maintain suspense, dramatic momentum, and curiosity throughout.
-3. MANDATORY LENGTH REQUIREMENT: You MUST write at least {target_words} spoken words to match a full {duration_mins}-minute video (at {voice_speed} pace). DO NOT summarize briefly or skip scenes. Elaborate on dialogues, character emotions, and scene details.
+3. MANDATORY LENGTH REQUIREMENT: You MUST write at least {target_words} spoken words to match a full {duration_mins}-minute video (at {voice_speed} pace). NOTE: This word target applies strictly to the spoken narration text under [VOICEOVER] (scene tags, dialogue references, headings, and sound effect cues do NOT count toward this requirement). DO NOT summarize briefly or skip scenes. Elaborate on dialogues, character emotions, and scene details.
 4. Narrative Act Quotas:
 - Hook & Act 1 Target: ~{act1_words} words
 - Act 2 Target: ~{act2_words} words
@@ -4148,14 +4670,51 @@ FORMATTING & AI DIRECTOR REQUIREMENTS:
         story_beats: Optional[List[Dict[str, Any]]] = None,
         openai_api_key: Optional[str] = None,
         ai_provider: str = "auto",
-        dialogue_timeline: Optional[List[Dict[str, Any]]] = None
+        dialogue_timeline: Optional[List[Dict[str, Any]]] = None,
+        enable_tts_feedback: bool = False,
+        tts_feedback_audio_path: Optional[str] = None
     ) -> Dict[str, Any]:
         """
         Generates a viral cinematic storytelling recap or universal explainer in any of the 15+ supported languages.
         Guarantees length precision with automatic multi-act verification and expansion.
         """
         api_key = gemini_api_key or os.environ.get("GEMINI_API_KEY", "")
-        target_words = ScriptEngine.calculate_target_words(duration_mins, voice_speed, target_lang)
+        target_words = ScriptEngine.calculate_target_words(
+            duration_mins, voice_speed, target_lang, anti_copyright_drift=True
+        )
+
+        def _apply_feedback(res_dict: Dict[str, Any]) -> Dict[str, Any]:
+            if not enable_tts_feedback or not res_dict.get("success") or not res_dict.get("script"):
+                return res_dict
+            fb_res = ScriptEngine.converge_script_duration_with_tts_feedback_sync(
+                script_text=res_dict["script"],
+                duration_mins=duration_mins,
+                target_lang=target_lang,
+                voice_speed=voice_speed,
+                output_audio_path=tts_feedback_audio_path,
+                dialogue_timeline=dialogue_timeline,
+                evidence_packets=evidence_packets,
+                story_plan=story_plan
+            )
+            res_dict["script"] = fb_res["script"]
+            res_dict["actual_words"] = fb_res["final_spoken_words"]
+            res_dict["raw_words"] = len(fb_res["script"].split())
+            res_dict["audio_path"] = fb_res.get("audio_path")
+            res_dict["requested_duration_seconds"] = fb_res["requested_duration_seconds"]
+            res_dict["initial_tts_duration"] = fb_res["initial_tts_duration"]
+            res_dict["final_tts_duration"] = fb_res["final_tts_duration"]
+            res_dict["initial_projected_final_duration"] = fb_res["initial_projected_final_duration"]
+            res_dict["final_projected_final_duration"] = fb_res["final_projected_final_duration"]
+            res_dict["duration_error_seconds"] = fb_res["duration_error_seconds"]
+            res_dict["duration_converged"] = fb_res["duration_converged"]
+            res_dict["correction_attempts"] = fb_res["correction_attempts"]
+            res_dict["initial_spoken_words"] = fb_res["initial_spoken_words"]
+            res_dict["final_spoken_words"] = fb_res["final_spoken_words"]
+            res_dict["duration_feedback_report"] = fb_res.get("reason", "")
+            if not fb_res.get("duration_converged"):
+                res_dict["is_valid"] = False
+                res_dict["integrity_report"] = f"Duration convergence failed: {fb_res.get('reason', '')}"
+            return res_dict
 
         # Phase 3B: Grounded Evidence Packets + Story Plan Construction & Validation
         evidence_packets = []
@@ -4231,8 +4790,7 @@ Separate each part strictly with '===PART===' on its own line."""
                         target_lang=target_lang,
                         voice_speed=voice_speed
                     )
-                    clean_narr_g, _, _ = ScriptEngine.parse_storyboard(gen_text)
-                    spoken_word_count_g = len(clean_narr_g.split()) if clean_narr_g else len(gen_text.split())
+                    spoken_word_count_g = ScriptEngine.get_spoken_word_count(gen_text)
                     hook_metrics_g = ScriptEngine.calculate_hook_score(gen_text, target_lang)
                     p_model = ai_cfg["providers"][current_active].get("model", current_active)
                     return {
@@ -4278,19 +4836,23 @@ Separate each part strictly with '===PART===' on its own line."""
                     )
 
                 def oa_expand(s_str: str, actual_w: int) -> Optional[str]:
-                    if duration_mins >= 3 and actual_w < int(target_words * 0.80):
-                        exp_prompt = f"""The following {lang_info['name']} script is only {actual_w} words, but the video duration requires AT LEAST {target_words} words:
-
---- CURRENT SCRIPT ---
-{s_str}
---- END ---
-
-TASK: Elaborate, expand and enrich the story across Act 1, Act 2, and Act 3 with detailed character dialogues, dramatic internal monologues, intense scene descriptions, and escalating emotional stakes to reach {target_words} words. Return the complete, expanded narrative with milestone timestamp brackets like [01:15 - 02:30]."""
-                        try:
-                            return call_chatgpt_llm(prompt=exp_prompt, system_prompt=system_instruction, model=gpt_model, max_tokens=4000, api_key=oa_key)
-                        except Exception:
-                            return None
-                    return None
+                    exp_prompt = ScriptEngine.build_expansion_prompt(
+                        current_script=s_str,
+                        actual_spoken_words=actual_w,
+                        target_words=target_words,
+                        target_lang=target_lang,
+                        genre=genre
+                    )
+                    try:
+                        return call_chatgpt_llm(
+                            prompt=exp_prompt,
+                            system_prompt=system_instruction,
+                            model=gpt_model,
+                            max_tokens=4000,
+                            api_key=oa_key
+                        )
+                    except Exception:
+                        return None
 
                 gpt_text, is_valid, val_report, attempts, val_details = ScriptEngine.generate_script_with_chronology_guard(
                     generate_fn=oa_gen,
@@ -4302,11 +4864,11 @@ TASK: Elaborate, expand and enrich the story across Act 1, Act 2, and Act 3 with
                     dialogue_timeline=dialogue_timeline,
                     evidence_packets=evidence_packets,
                     story_plan=story_plan,
-                    expand_fn=oa_expand if (duration_mins >= 3) else None
+                    expand_fn=oa_expand if (duration_mins >= 3) else None,
+                    strict_conformance=(duration_mins >= 3)
                 )
                 if gpt_text:
-                    clean_narr_oa, _, _ = ScriptEngine.parse_storyboard(gpt_text)
-                    spoken_word_count_oa = len(clean_narr_oa.split()) if clean_narr_oa else len(gpt_text.split())
+                    spoken_word_count_oa = ScriptEngine.get_spoken_word_count(gpt_text)
                     hook_metrics = ScriptEngine.calculate_hook_score(gpt_text, target_lang)
                     res = {
                         "success": True,
@@ -4331,7 +4893,7 @@ TASK: Elaborate, expand and enrich the story across Act 1, Act 2, and Act 3 with
                         res["failure_type"] = "chronology_violation"
                         res["error"] = val_report
                         res["chronology_details"] = val_details
-                    return res
+                    return _apply_feedback(res)
         except Exception as e:
             print(f"[OpenAI ChatGPT Integration Notice] Fallback triggered: {e}")
 
@@ -4346,19 +4908,22 @@ TASK: Elaborate, expand and enrich the story across Act 1, Act 2, and Act 3 with
                     return call_ninerouter_llm(prompt=p_str, system_prompt=system_instruction, timeout_sec=90, max_tokens=4000)
 
                 def nine_expand(s_str: str, actual_w: int) -> Optional[str]:
-                    if duration_mins >= 3 and actual_w < int(target_words * 0.80):
-                        exp_prompt = f"""The following {lang_info['name']} script is only {actual_w} words, but the video duration requires AT LEAST {target_words} words:
-
---- CURRENT SCRIPT ---
-{s_str}
---- END ---
-
-TASK: Elaborate, expand and enrich the story across Act 1, Act 2, and Act 3 with detailed character dialogues, dramatic internal monologues, intense scene descriptions, and escalating emotional stakes to reach {target_words} words. Return the complete, expanded narrative with milestone timestamp brackets like [01:15 - 02:30]."""
-                        try:
-                            return call_ninerouter_llm(prompt=exp_prompt, system_prompt=system_instruction, timeout_sec=90, max_tokens=4000)
-                        except Exception:
-                            return None
-                    return None
+                    exp_prompt = ScriptEngine.build_expansion_prompt(
+                        current_script=s_str,
+                        actual_spoken_words=actual_w,
+                        target_words=target_words,
+                        target_lang=target_lang,
+                        genre=genre
+                    )
+                    try:
+                        return call_ninerouter_llm(
+                            prompt=exp_prompt,
+                            system_prompt=system_instruction,
+                            timeout_sec=90,
+                            max_tokens=4000
+                        )
+                    except Exception:
+                        return None
 
                 nine_text, is_valid, val_report, attempts, val_details = ScriptEngine.generate_script_with_chronology_guard(
                     generate_fn=nine_gen,
@@ -4370,11 +4935,11 @@ TASK: Elaborate, expand and enrich the story across Act 1, Act 2, and Act 3 with
                     dialogue_timeline=dialogue_timeline,
                     evidence_packets=evidence_packets,
                     story_plan=story_plan,
-                    expand_fn=nine_expand if (duration_mins >= 3) else None
+                    expand_fn=nine_expand if (duration_mins >= 3) else None,
+                    strict_conformance=(duration_mins >= 3)
                 )
                 if nine_text:
-                    clean_narr, _, _ = ScriptEngine.parse_storyboard(nine_text)
-                    spoken_word_count = len(clean_narr.split()) if clean_narr else len(nine_text.split())
+                    spoken_word_count = ScriptEngine.get_spoken_word_count(nine_text)
                     hook_metrics = ScriptEngine.calculate_hook_score(nine_text, target_lang)
                     res = {
                         "success": True,
@@ -4399,7 +4964,7 @@ TASK: Elaborate, expand and enrich the story across Act 1, Act 2, and Act 3 with
                         res["failure_type"] = "chronology_violation"
                         res["error"] = val_report
                         res["chronology_details"] = val_details
-                    return res
+                    return _apply_feedback(res)
         except Exception as e:
             print(f"[9Router Integration Warning] {e}")
 
@@ -4415,17 +4980,16 @@ TASK: Elaborate, expand and enrich the story across Act 1, Act 2, and Act 3 with
                         return res_json["candidates"][0]["content"]["parts"][0]["text"].strip()
 
                 def gemini_expand(s_str: str, actual_w: int) -> Optional[str]:
-                    if duration_mins >= 3 and actual_w < int(target_words * 0.80):
-                        exp_res = ScriptEngine.expand_script(
-                            current_script=s_str,
-                            target_lang=target_lang,
-                            duration_mins=duration_mins,
-                            voice_speed=voice_speed,
-                            genre=genre,
-                            gemini_api_key=api_key
-                        )
-                        if exp_res.get("success") and exp_res.get("script"):
-                            return exp_res["script"]
+                    exp_res = ScriptEngine.expand_script(
+                        current_script=s_str,
+                        target_lang=target_lang,
+                        duration_mins=duration_mins,
+                        voice_speed=voice_speed,
+                        genre=genre,
+                        gemini_api_key=api_key
+                    )
+                    if exp_res.get("success") and exp_res.get("script"):
+                        return exp_res["script"]
                     return None
 
                 try:
@@ -4439,11 +5003,11 @@ TASK: Elaborate, expand and enrich the story across Act 1, Act 2, and Act 3 with
                         dialogue_timeline=dialogue_timeline,
                         evidence_packets=evidence_packets,
                         story_plan=story_plan,
-                        expand_fn=gemini_expand if (duration_mins >= 3) else None
+                        expand_fn=gemini_expand if (duration_mins >= 3) else None,
+                        strict_conformance=(duration_mins >= 3)
                     )
                     if text:
-                        clean_narr_g, _, _ = ScriptEngine.parse_storyboard(text)
-                        spoken_word_count_g = len(clean_narr_g.split()) if clean_narr_g else len(text.split())
+                        spoken_word_count_g = ScriptEngine.get_spoken_word_count(text)
                         hook_metrics = ScriptEngine.calculate_hook_score(text, target_lang)
                         res = {
                             "success": True,
@@ -4468,14 +5032,14 @@ TASK: Elaborate, expand and enrich the story across Act 1, Act 2, and Act 3 with
                             res["failure_type"] = "chronology_violation"
                             res["error"] = val_report
                             res["chronology_details"] = val_details
-                        return res
+                        return _apply_feedback(res)
                 except Exception:
                     continue
 
         # 3. Fallback multi-language template generator
         fallback_text = ScriptEngine._generate_fallback_script(title, target_lang, mood, persona, duration_mins)
         hook_metrics = ScriptEngine.calculate_hook_score(fallback_text, target_lang)
-        return {
+        return _apply_feedback({
             "success": True,
             "model": "local_fallback_engine",
             "script": fallback_text,
@@ -4491,7 +5055,7 @@ TASK: Elaborate, expand and enrich the story across Act 1, Act 2, and Act 3 with
             "story_plan": [s.to_dict() if hasattr(s, "to_dict") else s for s in story_plan],
             "is_plan_valid": is_plan_valid,
             "plan_validation_report": plan_validation_report
-        }
+        })
 
     @staticmethod
     def _generate_fallback_script(title: str, lang: str, mood: str, persona: str, duration_mins: int = 3) -> str:
@@ -4614,23 +5178,19 @@ TASK: Elaborate, expand and enrich the story across Act 1, Act 2, and Act 3 with
         gemini_api_key: Optional[str] = None
     ) -> Dict[str, Any]:
         """Expands an existing script to reach the full target word count."""
-        target_words = ScriptEngine.calculate_target_words(duration_mins, voice_speed, target_lang)
+        target_words = ScriptEngine.calculate_target_words(
+            duration_mins, voice_speed, target_lang, anti_copyright_drift=True
+        )
         lang_info = SUPPORTED_LANGUAGES.get(target_lang, SUPPORTED_LANGUAGES["en"])
-        clean_text, _, _ = ScriptEngine.parse_storyboard(current_script)
-        current_words = len(clean_text.split())
+        current_words = ScriptEngine.get_spoken_word_count(current_script)
 
-        prompt = f"""You are an elite YouTube storytelling storyboard writer in natural colloquial {lang_info['name']}.
-The creator requires a full {duration_mins}-minute explainer which needs at least {target_words} spoken words, but the current script only has {current_words} words.
-
-CURRENT SCRIPT:
-{current_script}
-
-EXPANSION INSTRUCTIONS:
-1. Preserve the core story arc, character names, tone, and final climax/twist.
-2. Greatly expand and elaborate on Act 1 and Act 2 by detailing scene interactions, character dialogues, inner turmoil, and escalating dramatic confrontations.
-3. Bring the total script length to AT LEAST {target_words} spoken words.
-4. Maintain milestone scene timestamp brackets like [01:15 - 02:30].
-Return the complete, expanded storyboard narrative."""
+        prompt = ScriptEngine.build_expansion_prompt(
+            current_script=current_script,
+            actual_spoken_words=current_words,
+            target_words=target_words,
+            target_lang=target_lang,
+            genre=genre
+        )
 
         # 1. 9Router expansion
         try:
@@ -4641,11 +5201,13 @@ Return the complete, expanded storyboard narrative."""
                 if exp_text and len(exp_text.strip()) > 100:
                     exp_text = ScriptEngine.strip_code_and_developer_artifacts(exp_text)
                     hook_metrics = ScriptEngine.calculate_hook_score(exp_text, target_lang)
+                    spoken_w = ScriptEngine.get_spoken_word_count(exp_text)
                     return {
                         "success": True,
                         "script": exp_text.strip(),
                         "target_words": target_words,
-                        "actual_words": len(exp_text.split()),
+                        "actual_words": spoken_w,
+                        "raw_words": len(exp_text.split()),
                         "hook_score": hook_metrics
                     }
         except Exception as e:
@@ -4665,11 +5227,13 @@ Return the complete, expanded storyboard narrative."""
                         if text:
                             text = ScriptEngine.strip_code_and_developer_artifacts(text)
                             hook_metrics = ScriptEngine.calculate_hook_score(text, target_lang)
+                            spoken_w = ScriptEngine.get_spoken_word_count(text)
                             return {
                                 "success": True,
                                 "script": text.strip(),
                                 "target_words": target_words,
-                                "actual_words": len(text.split()),
+                                "actual_words": spoken_w,
+                                "raw_words": len(text.split()),
                                 "hook_score": hook_metrics
                             }
                 except Exception as ge:
