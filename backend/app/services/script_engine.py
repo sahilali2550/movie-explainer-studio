@@ -175,6 +175,10 @@ class DialogueRefProvenance:
     normalized_source: str = ""
     reason: str = ""
 
+    @property
+    def movie_start(self) -> Optional[float]:
+        return self.source_timestamp
+
     def to_dict(self) -> Dict[str, Any]:
         return {
             "status": self.status,
@@ -183,6 +187,7 @@ class DialogueRefProvenance:
             "evidence_ref": self.evidence_ref,
             "source_text": self.source_text,
             "source_timestamp": self.source_timestamp,
+            "movie_start": self.movie_start,
             "cue_index": self.cue_index,
             "match_type": self.match_type,
             "normalized_ref": self.normalized_ref,
@@ -909,31 +914,237 @@ class ScriptEngine:
         text = re.sub(r'\n{3,}', '\n\n', text).strip()
         return text
 
+    # Phase 7B: Multilingual Stopwords, Keywords, Stem Exceptions & Language Detection
+    ENGLISH_STOP_WORDS = {
+        'a', 'an', 'the', 'is', 'in', 'it', 'of', 'to', 'and', 'or',
+        'on', 'at', 'by', 'as', 'be', 'we', 'he', 'she', 'his', 'her',
+        'was', 'are', 'this', 'that', 'with', 'for', 'from', 'not',
+        'but', 'so', 'if', 'its', 'into', 'up', 'out', 'now', 'then',
+        'were', 'have', 'has', 'had', 'would', 'could', 'will', 'do',
+        'i', 'you', 'my', 'your', 'me', 'him', 'them', 'they', 'what',
+        'who', 'how', 'why', 'when', 'where', 'there', 'here', 'just',
+        'about', 'like', 'well', 'um', 'uh', 'yeah', 'okay', 'oh', 'no', 'yes',
+        'don', 'didn', 'doesn', 'wasn', 'weren', 'haven', 'hasn', 'hadn',
+        'won', 'wouldn', 'couldn', 'shouldn', 'isn', 'aren', 'ain',
+        've', 're', 'll', 'd', 'm', 'kind', 'sort'
+    }
+
+    ENGLISH_NARRATIVE_KEYWORDS = {
+        'kill', 'killer', 'murder', 'murderer', 'dead', 'death', 'die', 'died', 'poison', 'poisoned',
+        'victim', 'suspect', 'police', 'detective', 'gun', 'shoot', 'shot', 'weapon', 'blood',
+        'secret', 'truth', 'discover', 'discovered', 'reveal', 'revealed', 'hide', 'evidence', 'proof',
+        'lie', 'lied', 'escape', 'escaped', 'trap', 'trapped', 'danger', 'bomb', 'destroy', 'destroyed',
+        'save', 'saved', 'help', 'betray', 'betrayed', 'confess', 'confession', 'arrest', 'arrested',
+        'stole', 'steal', 'brother', 'sister', 'father', 'mother', 'daughter', 'son', 'husband', 'wife',
+        'money', 'end', 'final', 'goodbye', 'love', 'hate', 'promise', 'trust', 'run', 'found'
+    }
+
+    MULTILINGUAL_NARRATIVE_KEYWORDS = {
+        # English
+        "secret", "killed", "mystery", "shock", "trap", "never", "nobody", "twisted", "died", "lie",
+        "revelation", "discover", "twist", "truth", "clue", "murder", "confront", "escape", "fight",
+        "victim", "alive", "faked", "frame", "courtroom", "betray", "mastermind",
+        # Urdu
+        "راز", "قتل", "دھوکہ", "خوفناک", "ہوش", "حیران", "خطرناک", "سازش", "انجام", "انکشاف", "غدار", "موڑ",
+        # Hindi
+        "सच", "मौत", "धोखा", "रहस्य", "चौंकाने", "खतरनाक", "साजिश", "खुलासा", "कातिल", "सबूत",
+        # Spanish
+        "secreto", "muerte", "asesino", "misterio", "trampa", "verdad", "descubrir", "pista", "huir", "traidor", "clímax", "confrontación", "desenmascarado",
+        # Russian
+        "секрет", "тайна", "убийство", "убийца", "опасность", "правда", "ложь", "ловушка", "предатель", "побег", "ключ", "противостояние", "разоблачен"
+    }
+
+    ENGLISH_STEM_EXCEPTIONS = {
+        "care": {"care"},
+        "career": {"career"},
+        "organ": {"organ"},
+        "organic": {"organic"},
+        "universe": {"universe"},
+        "university": {"university"},
+    }
+
     @staticmethod
-    def _evaluate_block_importance(block_text: str) -> float:
+    def detect_text_language(text: str, default: str = "en") -> str:
         """
-        Phase 1 Interim Heuristic for Content-Aware Block Evaluation:
-        1. Introduced in Phase 1 to replace the content-blind positional middle deletion (drop_idx = len//2).
-        2. Fully deterministic function evaluating narrative triggers, dialogue tags, and substantive text length.
-        3. Operates as an interim heuristic to preserve critical plot points during budget clamping.
-        4. Its keyword vocabulary (EN, UR, HI) is not a complete multilingual semantic model.
-        5. Comprehensive multilingual semantic narrative scoring belongs to a later phase.
+        Phase 7B: Fast, deterministic Unicode script & heuristic language detector.
+        Zero external dependencies.
+        Returns 2-letter ISO language code (e.g. 'en', 'es', 'fr', 'de', 'pt', 'tr', 'id', 'ru', 'ar', 'ur', 'hi', 'bn').
+        """
+        if not text or not str(text).strip():
+            return default
+
+        clean = unicodedata.normalize("NFKC", str(text))
+
+        # Check script ranges
+        # 1. Arabic / Urdu script
+        if re.search(r'[\u0600-\u06FF\u0750-\u077F\uFB50-\uFDFF\uFE70-\uFEFF]', clean):
+            # Urdu specific characters: ٹ, ڈ, ڑ, ں, ے, ہ, ھ, ۂ, ۃ, ؤ, ئے, ۓ
+            if re.search(r'[\u0679\u0688\u0691\u06BA\u06D2\u06BE\u06C1\u06C2\u06C3\u06D3\u0624]', clean):
+                return "ur"
+            return "ar"
+
+        # 2. Devanagari (Hindi)
+        if re.search(r'[\u0900-\u097F]', clean):
+            return "hi"
+
+        # 3. Bengali
+        if re.search(r'[\u0980-\u09FF]', clean):
+            return "bn"
+
+        # 4. Cyrillic (Russian)
+        if re.search(r'[\u0400-\u04FF]', clean):
+            return "ru"
+
+        # 5. Latin-based language heuristics (diacritics & specific characters)
+        # Turkish: ı (dotless i), İ (dotted capital I), ş, Ş, ğ, Ğ
+        if re.search(r'[\u0131\u0130\u015F\u015E\u011F\u011E]', clean):
+            return "tr"
+
+        # German: ä, ö, ü, ß, Ä, Ö, Ü
+        if re.search(r'[äöüßÄÖÜ]', clean):
+            return "de"
+
+        # Spanish: ¿, ¡, ñ, Ñ
+        if re.search(r'[¿¡ñÑ]', clean):
+            return "es"
+
+        # French: œ, æ, ç, Ç, or elision markers (l', d', c', j', qu')
+        if re.search(r'[œæçÇ]', clean) or re.search(r"\b(?:l|d|c|j|m|t|s|n|qu)['']\w+", clean, flags=re.IGNORECASE):
+            return "fr"
+
+        # Portuguese: ã, õ, Ã, Õ
+        if re.search(r'[ãõÃÕ]', clean):
+            return "pt"
+
+        # Common Spanish/Portuguese/French accented characters
+        if re.search(r'[áéíóúÁÉÍÓÚ]', clean):
+            low = clean.lower()
+            if any(w in low for w in [" el ", " la ", " los ", " las ", " del ", " por ", " para ", " con "]):
+                return "es"
+            if any(w in low for w in [" que ", " não ", " para ", " com ", " do ", " da "]):
+                return "pt"
+            return "es"
+
+        # Indonesian heuristic: check for common function words if Latin
+        low_words = set(re.findall(r'\b[a-z]{2,}\b', clean.lower()))
+        if {"yang", "dan", "di", "ini", "itu", "ke", "dari", "untuk"} & low_words:
+            return "id"
+
+        return default
+
+    @staticmethod
+    def tokenize_multilingual(text: str, language: Optional[str] = None) -> List[str]:
+        """
+        Phase 7B: Multilingual tokenization supporting Latin, Cyrillic, Arabic, Devanagari, Bengali, etc.
+        Applies Unicode NFKC normalization, strips punctuation safely, and applies English stopword
+        filtering ONLY when language == 'en'.
+        """
+        if not text:
+            return []
+        norm = unicodedata.normalize("NFKC", str(text))
+        # Strip speaker labels
+        norm = re.sub(r'^\s*[A-Za-z0-9_\s]{1,25}:\s*', '', norm)
+        lang = (language or ScriptEngine.detect_text_language(norm)).lower().strip()
+
+        if lang == "en":
+            # Apply English contraction expansion
+            norm = re.sub(r"\b(\w+)n['\"]t\b", r"\1 not", norm, flags=re.IGNORECASE)
+            norm = re.sub(r"\b(\w+)['\"]re\b", r"\1 are", norm, flags=re.IGNORECASE)
+            norm = re.sub(r"\b(\w+)['\"]ve\b", r"\1 have", norm, flags=re.IGNORECASE)
+            norm = re.sub(r"\b(\w+)['\"]ll\b", r"\1 will", norm, flags=re.IGNORECASE)
+            norm = re.sub(r"\b(\w+)['\"]d\b", r"\1 would", norm, flags=re.IGNORECASE)
+            norm = re.sub(r"\b(\w+)['\"]m\b", r"\1 am", norm, flags=re.IGNORECASE)
+            norm = re.sub(r"\b(\w+)['\"]s\b", r"\1s", norm, flags=re.IGNORECASE)
+
+        # Replace non-word characters with spaces (preserves Unicode word chars in all scripts)
+        norm = re.sub(r'[^\w\s]', ' ', norm, flags=re.UNICODE)
+        raw_tokens = re.findall(r'\w+', norm.lower(), flags=re.UNICODE)
+
+        tokens: List[str] = []
+        for t in raw_tokens:
+            if t.isdigit():
+                continue
+            if len(t) < 2:
+                continue
+            if lang == "en" and t in ScriptEngine.ENGLISH_STOP_WORDS:
+                continue
+            tokens.append(t)
+
+        return tokens
+
+    @staticmethod
+    def get_language_stems(w: str, language: Optional[str] = None) -> set:
+        """
+        Phase 7B: Language-scoped stem generator.
+        Applies English inflection stripping only for language=='en'.
+        Safely isolates other languages (returns {w}).
+        Enforces false-positive collision guards (e.g. care vs career, organ vs organic).
+        """
+        if not w:
+            return set()
+        w = w.lower().strip()
+        lang = (language or ScriptEngine.detect_text_language(w)).lower().strip()
+        if lang != "en":
+            return {w}
+
+        # Check English stem exceptions
+        if w in ScriptEngine.ENGLISH_STEM_EXCEPTIONS:
+            return set(ScriptEngine.ENGLISH_STEM_EXCEPTIONS[w])
+
+        if len(w) < 3:
+            return {w}
+
+        stems = {w}
+        # Plural / 3rd person -s, -es, -ies
+        if w.endswith("ies") and len(w) > 4:
+            stems.add(w[:-3] + "y")
+        elif w.endswith("es") and len(w) > 4 and not w.endswith(("ees", "ies")):
+            stems.add(w[:-2])
+            stems.add(w[:-1])
+        elif w.endswith("s") and len(w) > 3 and not w.endswith(("ss", "us", "is")):
+            stems.add(w[:-1])
+        # Past tense / participle -ed, -ied
+        if w.endswith("ied") and len(w) > 4:
+            stems.add(w[:-3] + "y")
+        elif w.endswith("ed") and len(w) > 4:
+            stems.add(w[:-2])
+            stems.add(w[:-1])
+        # Present participle -ing
+        if w.endswith("ing") and len(w) > 5:
+            base = w[:-3]
+            stems.add(base)
+            stems.add(base + "e")
+            if len(base) >= 3 and base[-1] == base[-2]:
+                stems.add(base[:-1])
+        # Agent noun -er, -or
+        if w.endswith("er") and len(w) > 4:
+            stems.add(w[:-2])
+            stems.add(w[:-1])
+        elif w.endswith("or") and len(w) > 4:
+            stems.add(w[:-2])
+        # Silent -e
+        if w.endswith("e") and len(w) > 3 and not w.endswith(("ee", "ye", "oe")):
+            stems.add(w[:-1])
+        return stems
+
+    @staticmethod
+    def _evaluate_block_importance(block_text: str, language: Optional[str] = None) -> float:
+        """
+        Phase 1 / 7B: Content-Aware Block Evaluation.
+        Fully deterministic function evaluating narrative triggers, dialogue tags, and substantive text length.
+        Language-neutral base informativeness with multilingual narrative keyword bonuses.
         """
         if not block_text:
             return 0.0
-        words = re.findall(r'\w+', block_text.lower(), flags=re.UNICODE)
+        words = ScriptEngine.tokenize_multilingual(block_text, language=language)
         if not words:
             return 0.0
-        triggers = {
-            "secret", "killed", "mystery", "shock", "trap", "never", "nobody", "twisted", "died", "lie",
-            "revelation", "discover", "twist", "truth", "clue", "murder", "confront", "escape", "fight",
-            "victim", "alive", "faked", "frame", "courtroom", "betray", "mastermind",
-            "راز", "قتل", "دھوکہ", "خوفناک", "ہوش", "حیران", "خطرناک", "سازش", "انجام", "انکشاف",
-            "सच", "मौत", "धोखा", "रहस्य", "चौंकाने", "खतरनाक", "साजिश", "खुलासा"
-        }
+        triggers = ScriptEngine.MULTILINGUAL_NARRATIVE_KEYWORDS
         kw_count = sum(1 for w in words if w in triggers)
-        has_dialogue = 1 if any(tag in block_text.lower() for tag in ["[dialogue_ref:", '"', '“']) else 0
-        return (kw_count * 10.0) + (has_dialogue * 15.0) + (len(words) * 0.5)
+        has_dialogue = 1 if any(tag in block_text.lower() for tag in ["[dialogue_ref:", '"', '“', '«', '»']) else 0
+        substantive = [w for w in words if len(w) >= 3 and not w.isdigit()]
+        unique_substantive = len(set(substantive))
+        return (kw_count * 10.0) + (has_dialogue * 15.0) + (len(words) * 0.5) + (unique_substantive * 0.5)
 
     # Phase 6H Duration Conformance Thresholds Grounded in Narrative Pacing Model:
     # - Standard Explainer (>= 3m): 0.80 spoken word floor (matches existing expansion threshold)
@@ -1645,10 +1856,12 @@ Output the complete corrected storyboard below:"""
         return max(1, min(total_cues, target_cap))
 
     @staticmethod
-    def evaluate_cue_informativeness(cue_text: str) -> float:
+    def evaluate_cue_informativeness(cue_text: str, language: Optional[str] = None) -> float:
         """
-        Evaluates narrative informativeness and semantic action density of a cue (Phase 3A Step 7).
+        Evaluates narrative informativeness and semantic action density of a cue (Phase 3A Step 7 / Phase 7B).
         Prevents raw character length from favoring rambling filler over concise plot revelations.
+        Language-aware: applies English stopwords/keywords for English, and language-neutral
+        substantive metrics + quote indicators for multilingual cues.
         """
         if not cue_text:
             return 0.0
@@ -1661,42 +1874,37 @@ Output the complete corrected storyboard below:"""
         if clean.startswith(('[', '(')) and any(tag in clean.upper() for tag in ['SFX', 'MUSIC', 'APPLAUSE', 'LAUGHTER', 'INARTICULATE']):
             return -10.0
 
-        STOP_WORDS = {
-            'a', 'an', 'the', 'is', 'in', 'it', 'of', 'to', 'and', 'or',
-            'on', 'at', 'by', 'as', 'be', 'we', 'he', 'she', 'his', 'her',
-            'was', 'are', 'this', 'that', 'with', 'for', 'from', 'not',
-            'but', 'so', 'if', 'its', 'into', 'up', 'out', 'now', 'then',
-            'were', 'have', 'has', 'had', 'would', 'could', 'will', 'do',
-            'i', 'you', 'my', 'your', 'me', 'him', 'them', 'they', 'what',
-            'who', 'how', 'why', 'when', 'where', 'there', 'here', 'just',
-            'about', 'like', 'well', 'um', 'uh', 'yeah', 'okay', 'oh', 'no', 'yes'
-        }
-
-        NARRATIVE_KEYWORDS = {
-            'kill', 'killer', 'murder', 'murderer', 'dead', 'death', 'die', 'died', 'poison', 'poisoned',
-            'victim', 'suspect', 'police', 'detective', 'gun', 'shoot', 'shot', 'weapon', 'blood',
-            'secret', 'truth', 'discover', 'discovered', 'reveal', 'revealed', 'hide', 'evidence', 'proof',
-            'lie', 'lied', 'escape', 'escaped', 'trap', 'trapped', 'danger', 'bomb', 'destroy', 'destroyed',
-            'save', 'saved', 'help', 'betray', 'betrayed', 'confess', 'confession', 'arrest', 'arrested',
-            'stole', 'steal', 'brother', 'sister', 'father', 'mother', 'daughter', 'son', 'husband', 'wife',
-            'money', 'end', 'final', 'goodbye', 'love', 'hate', 'promise', 'trust', 'run', 'found'
-        }
-
-        words = re.findall(r'\w{2,}', clean.lower(), flags=re.UNICODE)
+        lang = (language or ScriptEngine.detect_text_language(clean)).lower().strip()
+        words = ScriptEngine.tokenize_multilingual(clean, language=lang)
         if not words:
             return 0.0
 
-        info_words = [w for w in words if w not in STOP_WORDS and not w.isdigit()]
-        unique_info = set(info_words)
-        kw_count = sum(1 for w in unique_info if w in NARRATIVE_KEYWORDS)
-        repetition = max(0, len(words) - len(set(words)))
-        kw_density = (kw_count / len(unique_info)) if unique_info else 0.0
+        if lang == "en":
+            info_words = [w for w in words if w not in ScriptEngine.ENGLISH_STOP_WORDS and not w.isdigit()]
+            unique_info = set(info_words)
+            kw_count = sum(1 for w in unique_info if w in ScriptEngine.ENGLISH_NARRATIVE_KEYWORDS)
+            repetition = max(0, len(words) - len(set(words)))
+            kw_density = (kw_count / len(unique_info)) if unique_info else 0.0
 
-        sc = (len(unique_info) * 1.5) + (kw_count * 4.5) + (kw_density * 6.0) - (repetition * 1.5)
-        if len(clean) < 6:
-            sc -= 2.0
+            sc = (len(unique_info) * 1.5) + (kw_count * 4.5) + (kw_density * 6.0) - (repetition * 1.5)
+            if len(clean) < 6:
+                sc -= 2.0
+            return round(sc, 2)
+        else:
+            # Multilingual / Non-English: Language-neutral base informativeness
+            info_words = [w for w in words if len(w) >= 2 and not w.isdigit()]
+            unique_info = set(info_words)
+            repetition = max(0, len(words) - len(set(words)))
+            kw_count = sum(1 for w in unique_info if w in ScriptEngine.MULTILINGUAL_NARRATIVE_KEYWORDS)
+            kw_density = (kw_count / len(unique_info)) if unique_info else 0.0
 
-        return round(sc, 2)
+            sc = (len(unique_info) * 1.5) + (kw_count * 4.5) + (kw_density * 6.0) - (repetition * 1.5)
+            # Dialogue quote bonus
+            if any(q in clean for q in ['"', '“', '”', '«', '»', '—', '–']):
+                sc += 2.0
+            if len(clean) < 6:
+                sc -= 2.0
+            return round(sc, 2)
 
     @staticmethod
     def extract_balanced_transcript_sample(subs_text: str, max_chars: int = 4000) -> str:
@@ -1762,7 +1970,8 @@ Output the complete corrected storyboard below:"""
         total_movie_dur: float = 3600.0,
         max_points: Optional[int] = None,
         target_output_dur_mins: Optional[int] = None,
-        dialogue_timeline: Optional[List[Dict[str, Any]]] = None
+        dialogue_timeline: Optional[List[Dict[str, Any]]] = None,
+        language: Optional[str] = None
     ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
         """
         Extracts selected representative roadmap cues and all source cues across 5 narrative acts (Phase 3A/3B).
@@ -1888,7 +2097,7 @@ Output the complete corrected storyboard below:"""
                 sub_e = sub_s + sub_step
                 bucket = [(idx, c) for idx, c in enumerate(cands) if sub_s <= float(c["start"]) < sub_e and idx not in chosen_indices]
                 if bucket:
-                    best_idx, best_cue = max(bucket, key=lambda pair: ScriptEngine.evaluate_cue_informativeness(pair[1].get("text", "")))
+                    best_idx, best_cue = max(bucket, key=lambda pair: ScriptEngine.evaluate_cue_informativeness(pair[1].get("text", ""), language=language))
                     chosen_indices.add(best_idx)
                     k = round(float(best_cue["start"]), 1)
                     if k not in seen_starts:
@@ -2483,10 +2692,11 @@ STRICT GROUNDING RULES:
     # =========================================================================
 
     @staticmethod
-    def normalize_dialogue_text(s: str) -> str:
+    def normalize_dialogue_text(s: str, language: Optional[str] = None) -> str:
         """
-        Phase 6F: Normalizes dialogue text to tolerate harmless casing, whitespace,
+        Phase 6F/7B: Normalizes dialogue text to tolerate harmless casing, whitespace,
         punctuation, contraction, and Unicode differences without changing semantic content.
+        Language-aware: English contractions are ONLY expanded when language == 'en'.
         """
         if not s:
             return ""
@@ -2495,14 +2705,18 @@ STRICT GROUNDING RULES:
         norm = re.sub(r'[""«»„“”‘’`]', '"', norm)
         # Common speech/dialogue speaker prefixes like 'Peter: "..."' or 'Hero: '
         norm = re.sub(r'^\s*[A-Za-z0-9_\s]{1,25}:\s*', '', norm)
-        # Common contraction handling
-        norm = re.sub(r"\b(\w+)n['\"]t\b", r"\1 not", norm, flags=re.IGNORECASE)
-        norm = re.sub(r"\b(\w+)['\"]re\b", r"\1 are", norm, flags=re.IGNORECASE)
-        norm = re.sub(r"\b(\w+)['\"]ve\b", r"\1 have", norm, flags=re.IGNORECASE)
-        norm = re.sub(r"\b(\w+)['\"]ll\b", r"\1 will", norm, flags=re.IGNORECASE)
-        norm = re.sub(r"\b(\w+)['\"]d\b", r"\1 would", norm, flags=re.IGNORECASE)
-        norm = re.sub(r"\b(\w+)['\"]m\b", r"\1 am", norm, flags=re.IGNORECASE)
-        norm = re.sub(r"\b(\w+)['\"]s\b", r"\1s", norm, flags=re.IGNORECASE)
+
+        lang = (language or ScriptEngine.detect_text_language(norm)).lower().strip()
+        if lang == "en":
+            # Common contraction handling
+            norm = re.sub(r"\b(\w+)n['\"]t\b", r"\1 not", norm, flags=re.IGNORECASE)
+            norm = re.sub(r"\b(\w+)['\"]re\b", r"\1 are", norm, flags=re.IGNORECASE)
+            norm = re.sub(r"\b(\w+)['\"]ve\b", r"\1 have", norm, flags=re.IGNORECASE)
+            norm = re.sub(r"\b(\w+)['\"]ll\b", r"\1 will", norm, flags=re.IGNORECASE)
+            norm = re.sub(r"\b(\w+)['\"]d\b", r"\1 would", norm, flags=re.IGNORECASE)
+            norm = re.sub(r"\b(\w+)['\"]m\b", r"\1 am", norm, flags=re.IGNORECASE)
+            norm = re.sub(r"\b(\w+)['\"]s\b", r"\1s", norm, flags=re.IGNORECASE)
+
         # Strip punctuation characters including Urdu/Hindi punctuation
         norm = re.sub(r'[^\w\s]', ' ', norm, flags=re.UNICODE)
         return re.sub(r'\s+', ' ', norm.lower(), flags=re.UNICODE).strip()
@@ -2513,12 +2727,14 @@ STRICT GROUNDING RULES:
         clean_src: str,
         precomputed_norm_ref: Optional[str] = None,
         precomputed_ref_toks: Optional[set] = None,
-        precomputed_ref_sentences: Optional[List[str]] = None
+        precomputed_ref_sentences: Optional[List[str]] = None,
+        language: Optional[str] = None
     ) -> Optional[Tuple[float, str, str, str]]:
         """
-        Phase 6F: Evaluates provenance match strength between candidate dialogue_ref and source text.
+        Phase 6F/7B: Evaluates provenance match strength between candidate dialogue_ref and source text.
         Returns (score, match_type, norm_ref, norm_src) if valid, else None.
         Enforces that generic partial matches or single common words are never treated as valid source quotes.
+        Prevents short non-substantive words (e.g. 'de la', 'и в', 'کا') and translated quotes from matching.
         """
         if not clean_ref or not clean_src:
             return None
@@ -2531,8 +2747,15 @@ STRICT GROUNDING RULES:
         if clean_r == clean_s:
             return (1000.0, "exact", clean_r, clean_s)
 
-        norm_ref = precomputed_norm_ref if precomputed_norm_ref is not None else ScriptEngine.normalize_dialogue_text(clean_r)
-        norm_src = ScriptEngine.normalize_dialogue_text(clean_s)
+        lang = (language or "en").lower().strip()
+
+        # Guard against translated dialogue ref: if source language is non-English and candidate ref is English
+        if lang != "en" and clean_r != clean_s:
+            if ScriptEngine.detect_text_language(clean_r) == "en":
+                return None
+
+        norm_ref = precomputed_norm_ref if precomputed_norm_ref is not None else ScriptEngine.normalize_dialogue_text(clean_r, language=lang)
+        norm_src = ScriptEngine.normalize_dialogue_text(clean_s, language=lang)
 
         if not norm_ref or not norm_src:
             return None
@@ -2540,23 +2763,22 @@ STRICT GROUNDING RULES:
         if norm_ref == norm_src:
             return (900.0, "normalized_exact", norm_ref, norm_src)
 
-        stop_words = {
-            "a", "an", "the", "is", "in", "it", "of", "to", "and", "or",
-            "on", "at", "by", "as", "be", "we", "he", "she", "his", "her",
-            "was", "are", "this", "that", "with", "for", "from", "not",
-            "but", "so", "if", "its", "into", "up", "out", "now", "then",
-            "were", "have", "has", "had", "would", "could", "will", "do",
-            "don", "didn", "doesn", "wasn", "weren", "haven", "hasn", "hadn",
-            "won", "wouldn", "couldn", "shouldn", "isn", "aren", "ain",
-            "ve", "re", "ll", "d", "m", "kind", "sort",
-        }
+        ref_toks = precomputed_ref_toks if precomputed_ref_toks is not None else set(ScriptEngine.tokenize_multilingual(clean_r, language=lang))
 
-        ref_toks = precomputed_ref_toks if precomputed_ref_toks is not None else {t for t in re.findall(r"\w{2,}", norm_ref.lower(), flags=re.UNICODE) if t not in stop_words and not t.isdigit()}
-        src_toks = {t for t in re.findall(r"\w{2,}", norm_src.lower(), flags=re.UNICODE) if t not in stop_words and not t.isdigit()}
+        # Short non-substantive token guard (e.g., 'de la', 'и в', 'کا')
+        chars_no_space = len(re.sub(r'\s+', '', norm_ref))
+        if chars_no_space < 4:
+            return None
+        if all(len(t) <= 2 for t in ref_toks) and len(norm_ref) < 12:
+            return None
 
         # 1. Reference is a substantive contiguous excerpt of source cue (Case B & Section 9)
         if norm_ref in norm_src:
-            is_substantive = any(len(t) >= 4 for t in ref_toks) or len(ref_toks) >= 2 or len(norm_ref) >= 8
+            is_substantive = (
+                any(len(t) >= 4 for t in ref_toks) or
+                (len(ref_toks) >= 3 and len(norm_ref) >= 8) or
+                len(norm_ref) >= 12
+            )
             if is_substantive:
                 return (500.0 + len(norm_ref), "source_contained_excerpt", norm_ref, norm_src)
 
@@ -2565,31 +2787,38 @@ STRICT GROUNDING RULES:
         if len(ref_sentences) > 1:
             best_sent_sc = 0.0
             for r_s in ref_sentences:
-                n_rs = ScriptEngine.normalize_dialogue_text(r_s)
-                t_rs = {t for t in re.findall(r"\w{2,}", n_rs.lower(), flags=re.UNICODE) if t not in stop_words and not t.isdigit()}
+                n_rs = ScriptEngine.normalize_dialogue_text(r_s, language=lang)
+                t_rs = set(ScriptEngine.tokenize_multilingual(r_s, language=lang))
                 if n_rs and n_rs in norm_src:
-                    if len(n_rs) >= 8 or any(len(t) >= 4 for t in t_rs) or len(t_rs) >= 2:
-                        best_sent_sc = max(best_sent_sc, 450.0 + len(n_rs))
+                    rs_chars = len(re.sub(r'\s+', '', n_rs))
+                    if rs_chars >= 4 and not (all(len(t) <= 2 for t in t_rs) and len(n_rs) < 12):
+                        if len(n_rs) >= 8 or any(len(t) >= 4 for t in t_rs) or len(t_rs) >= 2:
+                            best_sent_sc = max(best_sent_sc, 450.0 + len(n_rs))
             if best_sent_sc > 0.0:
                 return (best_sent_sc, "source_contained_excerpt", norm_ref, norm_src)
 
         # 3. Source cue is a substantive excerpt of reference (e.g. multi-cue dialogue)
         # Must NOT match single generic words like "You." or "What?"
         if norm_src in norm_ref:
+            src_toks = set(ScriptEngine.tokenize_multilingual(clean_s, language=lang))
             distinctive_src = any(len(t) >= 5 for t in src_toks)
-            if len(norm_src) >= 10 and (len(src_toks) >= 2 or distinctive_src):
-                return (300.0 + len(norm_src), "source_contains_excerpt", norm_ref, norm_src)
+            src_chars = len(re.sub(r'\s+', '', norm_src))
+            if src_chars >= 4 and not (all(len(t) <= 2 for t in src_toks) and len(norm_src) < 12):
+                if len(norm_src) >= 10 and (len(src_toks) >= 2 or distinctive_src):
+                    return (300.0 + len(norm_src), "source_contains_excerpt", norm_ref, norm_src)
 
         # 4. Multi-sentence source cue where at least one substantive sentence is in ref
         src_sentences = [s.strip() for s in re.split(r'[\.\!\?\;\n]+', clean_s) if s.strip()]
         if len(src_sentences) > 1:
             best_sent_sc = 0.0
             for c_s in src_sentences:
-                n_cs = ScriptEngine.normalize_dialogue_text(c_s)
-                t_cs = {t for t in re.findall(r"\w{2,}", n_cs.lower(), flags=re.UNICODE) if t not in stop_words and not t.isdigit()}
+                n_cs = ScriptEngine.normalize_dialogue_text(c_s, language=lang)
+                t_cs = set(ScriptEngine.tokenize_multilingual(c_s, language=lang))
                 if n_cs and n_cs in norm_ref:
-                    if len(n_cs) >= 10 and (len(t_cs) >= 2 or any(len(t) >= 5 for t in t_cs)):
-                        best_sent_sc = max(best_sent_sc, 250.0 + len(n_cs))
+                    cs_chars = len(re.sub(r'\s+', '', n_cs))
+                    if cs_chars >= 4 and not (all(len(t) <= 2 for t in t_cs) and len(n_cs) < 12):
+                        if len(n_cs) >= 10 and (len(t_cs) >= 2 or any(len(t) >= 5 for t in t_cs)):
+                            best_sent_sc = max(best_sent_sc, 250.0 + len(n_cs))
             if best_sent_sc > 0.0:
                 return (best_sent_sc, "source_contains_excerpt", norm_ref, norm_src)
 
@@ -2600,10 +2829,11 @@ STRICT GROUNDING RULES:
         dialogue_ref: Optional[str],
         evidence_packets: Optional[List[Any]] = None,
         dialogue_timeline: Optional[List[Dict[str, Any]]] = None,
-        source_text: Optional[str] = None
+        source_text: Optional[str] = None,
+        language: Optional[str] = None
     ) -> DialogueRefProvenance:
         """
-        Phase 6F: Deterministic validation answering: Is this dialogue_ref actually source-bound?
+        Phase 6F/7B: Deterministic validation answering: Is this dialogue_ref actually source-bound?
         Distinguishes SOURCE_BOUND vs NOT_SOURCE_BOUND.
         Traceable to EvidencePacket -> source cue -> timestamp.
         """
@@ -2616,7 +2846,8 @@ STRICT GROUNDING RULES:
             )
 
         clean_ref = str(dialogue_ref).strip().strip('"\'“”‘’')
-        norm_ref = ScriptEngine.normalize_dialogue_text(clean_ref)
+        resolved_lang = (language or ScriptEngine.detect_text_language(clean_ref)).lower().strip()
+        norm_ref = ScriptEngine.normalize_dialogue_text(clean_ref, language=resolved_lang)
 
         has_packets = evidence_packets is not None and len(evidence_packets) > 0
         has_timeline = dialogue_timeline is not None and len(dialogue_timeline) > 0
@@ -2631,17 +2862,7 @@ STRICT GROUNDING RULES:
                 reason="no_source_evidence_available"
             )
 
-        stop_words = {
-            "a", "an", "the", "is", "in", "it", "of", "to", "and", "or",
-            "on", "at", "by", "as", "be", "we", "he", "she", "his", "her",
-            "was", "are", "this", "that", "with", "for", "from", "not",
-            "but", "so", "if", "its", "into", "up", "out", "now", "then",
-            "were", "have", "has", "had", "would", "could", "will", "do",
-            "don", "didn", "doesn", "wasn", "weren", "haven", "hasn", "hadn",
-            "won", "wouldn", "couldn", "shouldn", "isn", "aren", "ain",
-            "ve", "re", "ll", "d", "m", "kind", "sort",
-        }
-        ref_toks = {t for t in re.findall(r"\w{2,}", norm_ref.lower(), flags=re.UNICODE) if t not in stop_words and not t.isdigit()}
+        ref_toks = set(ScriptEngine.tokenize_multilingual(clean_ref, language=resolved_lang))
         ref_sentences = [s.strip() for s in re.split(r'[\.\!\?\;\n]+', clean_ref) if s.strip()]
 
         best_match = None
@@ -2660,7 +2881,8 @@ STRICT GROUNDING RULES:
                     p_text,
                     precomputed_norm_ref=norm_ref,
                     precomputed_ref_toks=ref_toks,
-                    precomputed_ref_sentences=ref_sentences
+                    precomputed_ref_sentences=ref_sentences,
+                    language=resolved_lang
                 )
                 if m and m[0] > best_score:
                     sc, m_type, n_ref, n_src = m
@@ -2690,7 +2912,8 @@ STRICT GROUNDING RULES:
                     c_text,
                     precomputed_norm_ref=norm_ref,
                     precomputed_ref_toks=ref_toks,
-                    precomputed_ref_sentences=ref_sentences
+                    precomputed_ref_sentences=ref_sentences,
+                    language=resolved_lang
                 )
                 if m and m[0] > best_score:
                     sc, m_type, n_ref, n_src = m
@@ -2717,7 +2940,8 @@ STRICT GROUNDING RULES:
                 source_text,
                 precomputed_norm_ref=norm_ref,
                 precomputed_ref_toks=ref_toks,
-                precomputed_ref_sentences=ref_sentences
+                precomputed_ref_sentences=ref_sentences,
+                language=resolved_lang
             )
             if m and m[0] > best_score:
                 sc, m_type, n_ref, n_src = m
@@ -2749,14 +2973,16 @@ STRICT GROUNDING RULES:
         dialogue_ref: Optional[str],
         evidence_packets: Optional[List[Any]] = None,
         dialogue_timeline: Optional[List[Dict[str, Any]]] = None,
-        source_text: Optional[str] = None
+        source_text: Optional[str] = None,
+        language: Optional[str] = None
     ) -> bool:
         """Convenience boolean check for source-bound provenance."""
         res = ScriptEngine.validate_dialogue_ref_provenance(
             dialogue_ref=dialogue_ref,
             evidence_packets=evidence_packets,
             dialogue_timeline=dialogue_timeline,
-            source_text=source_text
+            source_text=source_text,
+            language=language
         )
         return res.is_source_bound
 
@@ -2765,7 +2991,8 @@ STRICT GROUNDING RULES:
         blocks: List[Any],
         dialogue_timeline: Optional[List[Dict[str, Any]]] = None,
         evidence_packets: Optional[List[Any]] = None,
-        story_plan: Optional[List[Any]] = None
+        story_plan: Optional[List[Any]] = None,
+        language: Optional[str] = None
     ) -> Tuple[bool, str, Dict[str, Any]]:
         """
         Phase 6G.3: Deterministic Storyboard Chronology Validation.
@@ -2814,7 +3041,8 @@ STRICT GROUNDING RULES:
                 prov = ScriptEngine.validate_dialogue_ref_provenance(
                     dialogue_ref=b_ref,
                     evidence_packets=evidence_packets,
-                    dialogue_timeline=dialogue_timeline
+                    dialogue_timeline=dialogue_timeline,
+                    language=language
                 )
                 if prov.is_source_bound and prov.source_timestamp is not None:
                     b_ts = float(prov.source_timestamp)
@@ -3211,7 +3439,8 @@ Emit the complete repaired storyboard with corrected scene ordering that respect
         story_plan: Optional[List[Any]] = None,
         enforce_source_provenance: Optional[bool] = None,
         visual_provider: Optional[Any] = None,
-        video_path: Optional[str] = None
+        video_path: Optional[str] = None,
+        language: Optional[str] = None
     ) -> List[SceneBlock]:
         """
         Parses structured SceneBlock objects pairing each scene timestamp cut [SCENE: MM:SS - MM:SS]
@@ -3304,7 +3533,8 @@ Emit the complete repaired storyboard with corrected scene ordering that respect
                             prov = ScriptEngine.validate_dialogue_ref_provenance(
                                 dialogue_ref=dialogue_ref,
                                 evidence_packets=evidence_packets,
-                                dialogue_timeline=dialogue_timeline
+                                dialogue_timeline=dialogue_timeline,
+                                language=language
                             )
                             if prov.is_source_bound:
                                 dialogue_ref = prov.dialogue_ref
@@ -3378,7 +3608,8 @@ Emit the complete repaired storyboard with corrected scene ordering that respect
                 blocks=blocks,
                 dialogue_timeline=dialogue_timeline,
                 evidence_packets=evidence_packets,
-                story_plan=story_plan
+                story_plan=story_plan,
+                language=language
             )
             if not is_chron_valid:
                 # Halt visual anchoring: DO NOT proceed into anchor_scenes_to_dialogue()
@@ -3392,7 +3623,8 @@ Emit the complete repaired storyboard with corrected scene ordering that respect
                 blocks = ScriptEngine.anchor_scenes_to_dialogue(
                     blocks,
                     dialogue_timeline,
-                    embedding_provider=embedding_provider
+                    embedding_provider=embedding_provider,
+                    language=language
                 )
 
         # Phase 3B/6F: Link story_plan and evidence_ref to SceneBlocks if provided
@@ -3443,7 +3675,8 @@ Emit the complete repaired storyboard with corrected scene ordering that respect
         embedding_provider: Optional[Any] = None,
         semantic_top_k: int = 5,
         min_semantic_sim: float = 0.40,
-        semantic_weight: float = 1.50
+        semantic_weight: float = 1.50,
+        language: Optional[str] = None
     ) -> List["SceneBlock"]:
         """
         Dialogue-Anchor Algorithm (T-01).
@@ -3477,47 +3710,15 @@ Emit the complete repaired storyboard with corrected scene ordering that respect
         if not dialogue_timeline:
             return blocks  # graceful fallback: keep AI timestamps
 
-        # --- Stop-word filter (language-agnostic common words to ignore) ---
-        STOP_WORDS = {
-            "a", "an", "the", "is", "in", "it", "of", "to", "and", "or",
-            "on", "at", "by", "as", "be", "we", "he", "she", "his", "her",
-            "was", "are", "this", "that", "with", "for", "from", "not",
-            "but", "so", "if", "its", "into", "up", "out", "now", "then",
-            "were", "have", "has", "had", "would", "could", "will", "do",
-            # Contraction stems & conversational fillers (Phase 6E.2 hardening)
-            "don", "didn", "doesn", "wasn", "weren", "haven", "hasn", "hadn",
-            "won", "wouldn", "couldn", "shouldn", "isn", "aren", "ain",
-            "ve", "re", "ll", "d", "m", "kind", "sort",
-        }
+        # Resolve language: explicit parameter or auto-detect from narration
+        first_text = blocks[0].narration_text if blocks and blocks[0].narration_text else (dialogue_timeline[0].get("text", "") if dialogue_timeline else "")
+        lang = (language or ScriptEngine.detect_text_language(first_text)).lower().strip()
 
         def normalize_str(s: str) -> str:
-            if not s:
-                return ""
-            norm = unicodedata.normalize("NFKC", str(s))
-            norm = re.sub(r'[""«»„]', '"', norm)
-            norm = re.sub(r"['']", "'", norm)
-            norm = re.sub(r"n't\b", " not", norm)
-            norm = re.sub(r"'re\b", " are", norm)
-            norm = re.sub(r"'ve\b", " have", norm)
-            norm = re.sub(r"'ll\b", " will", norm)
-            norm = re.sub(r"'d\b", " would", norm)
-            norm = re.sub(r"'m\b", " am", norm)
-            norm = re.sub(r"[^\w\s]", " ", norm, flags=re.UNICODE)
-            return re.sub(r"\s+", " ", norm.lower(), flags=re.UNICODE).strip()
+            return ScriptEngine.normalize_dialogue_text(s, language=lang)
 
         def tokenize(text: str) -> set:
-            """Unicode alpha tokens for English, Urdu, Hindi, Arabic, etc., dropping stop-words and pure digits."""
-            if not text:
-                return set()
-            norm = unicodedata.normalize("NFKC", str(text))
-            norm = re.sub(r"n't\b", " not", norm)
-            norm = re.sub(r"'re\b", " are", norm)
-            norm = re.sub(r"'ve\b", " have", norm)
-            norm = re.sub(r"'ll\b", " will", norm)
-            norm = re.sub(r"'d\b", " would", norm)
-            norm = re.sub(r"'m\b", " am", norm)
-            tokens = re.findall(r"\w{2,}", norm.lower(), flags=re.UNICODE)
-            return {t for t in tokens if t not in STOP_WORDS and not t.isdigit()}
+            return set(ScriptEngine.tokenize_multilingual(text, language=lang))
 
         def longest_common_substring(s1: str, s2: str) -> str:
             """Finds the longest contiguous common substring between two normalized strings."""
@@ -3530,42 +3731,7 @@ Emit the complete repaired storyboard with corrected scene ordering that respect
             return ""
 
         def get_stems(w: str) -> set:
-            """Lightweight deterministic English inflection & stem generator."""
-            w = w.lower().strip()
-            if len(w) < 3:
-                return {w}
-            stems = {w}
-            # Plural / 3rd person -s, -es, -ies
-            if w.endswith("ies") and len(w) > 4:
-                stems.add(w[:-3] + "y")
-            elif w.endswith("es") and len(w) > 4 and not w.endswith(("ees", "ies")):
-                stems.add(w[:-2])
-                stems.add(w[:-1])
-            elif w.endswith("s") and len(w) > 3 and not w.endswith(("ss", "us", "is")):
-                stems.add(w[:-1])
-            # Past tense / participle -ed, -ied
-            if w.endswith("ied") and len(w) > 4:
-                stems.add(w[:-3] + "y")
-            elif w.endswith("ed") and len(w) > 4:
-                stems.add(w[:-2])
-                stems.add(w[:-1])
-            # Present participle -ing
-            if w.endswith("ing") and len(w) > 5:
-                base = w[:-3]
-                stems.add(base)
-                stems.add(base + "e")
-                if len(base) >= 3 and base[-1] == base[-2]:
-                    stems.add(base[:-1])
-            # Agent noun -er, -or
-            if w.endswith("er") and len(w) > 4:
-                stems.add(w[:-2])
-                stems.add(w[:-1])
-            elif w.endswith("or") and len(w) > 4:
-                stems.add(w[:-2])
-            # Silent -e
-            if w.endswith("e") and len(w) > 3 and not w.endswith(("ee", "ye", "oe")):
-                stems.add(w[:-1])
-            return stems
+            return ScriptEngine.get_language_stems(w, language=lang)
 
         def score_match(
             b_tokens: set,
@@ -3603,10 +3769,14 @@ Emit the complete repaired storyboard with corrected scene ordering that respect
                         if stems_b and stems_c and (stems_b & stems_c):
                             matched_ct = ct
                             break
-                        # 2. Pre-filtered difflib check for OCR/typos
+                        # 2. Pre-filtered difflib check for OCR/typos (guards against spurious collisions)
                         if bt[0] == ct[0] and abs(len(bt) - len(ct)) <= 2:
                             min_l, max_l = min(len(bt), len(ct)), max(len(bt), len(ct))
                             if min_l / max_l >= 0.70:
+                                if (bt == "organ" and ct == "organic") or (bt == "organic" and ct == "organ"):
+                                    continue
+                                if (bt == "care" and ct == "career") or (bt == "career" and ct == "care"):
+                                    continue
                                 if difflib.SequenceMatcher(None, bt, ct).ratio() >= 0.82:
                                     matched_ct = ct
                                     break
@@ -4337,13 +4507,19 @@ Emit the complete repaired storyboard with corrected scene ordering that respect
         return blocks
 
     @staticmethod
+    def anchor_scene_blocks_to_dialogue(*args, **kwargs) -> List["SceneBlock"]:
+        """Alias for anchor_scenes_to_dialogue (Phase 7B)."""
+        return ScriptEngine.anchor_scenes_to_dialogue(*args, **kwargs)
+
+    @staticmethod
     def explain_candidate_match(
         narration_text: str,
         cue_text: str,
-        embedding_provider: Optional[Any] = None
+        embedding_provider: Optional[Any] = None,
+        language: Optional[str] = None
     ) -> Dict[str, Any]:
         """
-        Test and auditing helper for source-grounding transparency (Phase 2 Step 9 / Phase 5).
+        Test and auditing helper for source-grounding transparency (Phase 2 Step 9 / Phase 5 / Phase 7B).
         Provides a deterministic breakdown of tokens, exact matches, morphological stems,
         and optional semantic similarity metrics.
         """
@@ -4351,62 +4527,13 @@ Emit the complete repaired storyboard with corrected scene ordering that respect
         import re
         import unicodedata
 
-        STOP_WORDS = {
-            "a", "an", "the", "is", "in", "it", "of", "to", "and", "or",
-            "on", "at", "by", "as", "be", "we", "he", "she", "his", "her",
-            "was", "are", "this", "that", "with", "for", "from", "not",
-            "but", "so", "if", "its", "into", "up", "out", "now", "then",
-            "were", "have", "has", "had", "would", "could", "will", "do",
-            # Contraction stems & conversational fillers (Phase 6E.2 hardening)
-            "don", "didn", "doesn", "wasn", "weren", "haven", "hasn", "hadn",
-            "won", "wouldn", "couldn", "shouldn", "isn", "aren", "ain",
-            "ve", "re", "ll", "d", "m", "kind", "sort",
-        }
+        lang = (language or ScriptEngine.detect_text_language(narration_text)).lower().strip()
 
         def tokenize(text: str) -> set:
-            if not text:
-                return set()
-            norm = unicodedata.normalize("NFKC", str(text))
-            norm = re.sub(r"n't\b", " not", norm)
-            norm = re.sub(r"'re\b", " are", norm)
-            norm = re.sub(r"'ve\b", " have", norm)
-            norm = re.sub(r"'ll\b", " will", norm)
-            norm = re.sub(r"'d\b", " would", norm)
-            norm = re.sub(r"'m\b", " am", norm)
-            tokens = re.findall(r"\w{2,}", norm.lower(), flags=re.UNICODE)
-            return {t for t in tokens if t not in STOP_WORDS and not t.isdigit()}
+            return set(ScriptEngine.tokenize_multilingual(text, language=lang))
 
         def get_stems(w: str) -> set:
-            w = w.lower().strip()
-            if len(w) < 3:
-                return {w}
-            stems = {w}
-            if w.endswith("ies") and len(w) > 4:
-                stems.add(w[:-3] + "y")
-            elif w.endswith("es") and len(w) > 4 and not w.endswith(("ees", "ies")):
-                stems.add(w[:-2])
-                stems.add(w[:-1])
-            elif w.endswith("s") and len(w) > 3 and not w.endswith(("ss", "us", "is")):
-                stems.add(w[:-1])
-            if w.endswith("ied") and len(w) > 4:
-                stems.add(w[:-3] + "y")
-            elif w.endswith("ed") and len(w) > 4:
-                stems.add(w[:-2])
-                stems.add(w[:-1])
-            if w.endswith("ing") and len(w) > 5:
-                base = w[:-3]
-                stems.add(base)
-                stems.add(base + "e")
-                if len(base) >= 3 and base[-1] == base[-2]:
-                    stems.add(base[:-1])
-            if w.endswith("er") and len(w) > 4:
-                stems.add(w[:-2])
-                stems.add(w[:-1])
-            elif w.endswith("or") and len(w) > 4:
-                stems.add(w[:-2])
-            if w.endswith("e") and len(w) > 3 and not w.endswith(("ee", "ye", "oe")):
-                stems.add(w[:-1])
-            return stems
+            return ScriptEngine.get_language_stems(w, language=lang)
 
         b_tokens = tokenize(narration_text)
         c_tokens = tokenize(cue_text)
@@ -4435,6 +4562,10 @@ Emit the complete repaired storyboard with corrected scene ordering that respect
                     if bt[0] == ct[0] and abs(len(bt) - len(ct)) <= 2:
                         min_l, max_l = min(len(bt), len(ct)), max(len(bt), len(ct))
                         if min_l / max_l >= 0.70:
+                            if (bt == "organ" and ct == "organic") or (bt == "organic" and ct == "organ"):
+                                continue
+                            if (bt == "care" and ct == "career") or (bt == "career" and ct == "care"):
+                                continue
                             if difflib.SequenceMatcher(None, bt, ct).ratio() >= 0.82:
                                 matched_ct = ct
                                 match_type = "sequence_matcher"
